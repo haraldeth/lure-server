@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 8790;
 
 /* ---- constants (mirror the client) ---- */
 const WORLD_R=2500, START_LENGTH=60, FOOD_TARGET=330, MAX_FOOD=520;
-const ROOM_CAPACITY=40, BOT_FILL=12, TICK=1/30;
+const ROOM_CAPACITY=40, BOT_FILL=12, TICK=1/20;
 const DROP_FRACTION=0.35;
 const BOT_NAMES=['ANGLER','KRAKEN','NAUTILUS','MANTA','VIPER','GLOWWORM','LEVIATHAN','DRIFTER','SIREN','ABYSSAL','LANTERN','EEL'];
 const COLORS=['#45e8d4','#ff7ac8','#ffd166','#9d8cff','#7ce38b','#ff9d66'];
@@ -50,9 +50,8 @@ function topList(map,n){return Object.entries(map).map(([name,score])=>({name,sc
 /* ---- rooms ---- */
 const rooms=[];
 function newRoom(){
-  const room={players:new Map(),bots:[],foods:new Map(),nextFood:1,foodAdd:[],foodDel:[],id:rooms.length};
+  const room={players:new Map(),bots:[],foods:new Map(),nextFood:1,id:rooms.length};
   for(let i=0;i<FOOD_TARGET;i++)spawnFood(room);
-  room.foodAdd.length=0;
   for(let i=0;i<BOT_FILL;i++)spawnBot(room,i);
   rooms.push(room);return room;
 }
@@ -61,7 +60,12 @@ function spawnFood(room,x,y,v,c){
   const p=(x===undefined)?diskPoint(WORLD_R*.98):{x,y};
   const big=v===undefined&&Math.random()<.05;
   const f={i:room.nextFood++,x:p.x,y:p.y,v:v!==undefined?v:(big?20:rand(3,7)),c:c||COLORS[(Math.random()*6)|0],big:!!big};
-  room.foods.set(f.i,f);room.foodAdd.push(f);return f;
+  room.foods.set(f.i,f);
+  /* per-player diff queues: EVERY player receives EVERY food change. The old
+     shared queue handed each change to whichever player polled first, which
+     desynced everyone else's map (ghost orbs). */
+  for(const pl of room.players.values())pl.addQ.push(f);
+  return f;
 }
 function makeSnake(name,color,isBot){
   const p=diskPoint(WORLD_R*.6);
@@ -95,7 +99,7 @@ function step(room,dt){
     if(Math.hypot(b.x,b.y)>WORLD_R-280)target=Math.atan2(-b.y,-b.x);
     const dodge=(58+b.skill*46)**2;
     for(const o of all){if(o===b)continue;
-      const st=b.skill>.6?4:8;
+      const st=b.skill>.6?6:10;
       for(let i=0;i<o.body.length;i+=st){const p=o.body[i],dx=p.x-b.x,dy=p.y-b.y;
         if(dx*dx+dy*dy<dodge){target=Math.atan2(b.y-p.y,b.x-p.x)+rand(-(1-b.skill)*.9,(1-b.skill)*.9);break;}}}
     b.desired=target;
@@ -119,7 +123,7 @@ function step(room,dt){
         const a=s.path.pop(),b2=s.path[s.path.length-1];
         s.pathLen-=Math.hypot(a.x-b2.x,a.y-b2.y);}}
     /* body points, capped ~120 server-side (collisions only) */
-    const stp=Math.max(10,s.length/120);s.body=[];let acc=0,nx=0;
+    const stp=Math.max(10,s.length/80);s.body=[];let acc=0,nx=0;
     for(let i=1;i<s.path.length&&acc<s.length;i++){
       const a=s.path[i-1],b2=s.path[i],L=Math.hypot(b2.x-a.x,b2.y-a.y);if(L<1e-4)continue;
       while(nx<=acc+L&&nx<=s.length){const k=(nx-acc)/L;
@@ -133,11 +137,11 @@ function step(room,dt){
       if(dx*dx+dy*dy<rr*rr){
         const sizeM=1/(1+Math.max(0,s.length-START_LENGTH)/2600);
         s.length+=f.v*sizeM;
-        room.foods.delete(f.i);room.foodDel.push(f.i);
+        room.foods.delete(f.i);for(const pl of room.players.values())pl.delQ.push(f.i);
       }}}
   while(room.foods.size<FOOD_TARGET)spawnFood(room);
   if(room.foods.size>MAX_FOOD){const it=room.foods.keys();
-    while(room.foods.size>MAX_FOOD){const k=it.next().value;room.foods.delete(k);room.foodDel.push(k);}}
+    while(room.foods.size>MAX_FOOD){const k=it.next().value;room.foods.delete(k);for(const pl of room.players.values())pl.delQ.push(k);}}
   /* collisions: head vs others' bodies + wall */
   for(const s of all){
     if(!s.alive)continue;
@@ -147,7 +151,7 @@ function step(room,dt){
       if(o===s||!o.alive)continue;
       const dx0=o.x-s.x,dy0=o.y-s.y;
       if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
-      const bstep=Math.max(10,o.length/120);
+      const bstep=Math.max(10,o.length/80);
       const rr=hr+headR(o)*.8+bstep*.5;
       for(const p of o.body){const dx=p.x-s.x,dy=p.y-s.y;
         if(dx*dx+dy*dy<rr*rr){kill(room,s,o,o.name);break;}}
@@ -187,8 +191,17 @@ function snakesSnapshot(room){
       a:Math.round(s.angle*100)/100,l:Math.round(s.length),c:s.color,k:s.kills});
   return out;
 }
-function boardsSnapshot(){rollDay();return{day:topList(boards.day,50),all:topList(boards.all,50),
-  pool:boards.pool,burn:boards.burn};}
+let _bCache=null,_bTs=0;
+function cachedBoards(){
+  const now=Date.now();
+  if(!_bCache||now-_bTs>1000){
+    rollDay();
+    _bCache={day:topList(boards.day,50),all:topList(boards.all,50),
+      pool:boards.pool,burn:boards.burn};
+    _bTs=now;
+  }
+  return _bCache;
+}
 
 /* ---- http ---- */
 function json(res,code,obj){
@@ -198,7 +211,7 @@ function json(res,code,obj){
 }
 const server=http.createServer((req,res)=>{
   if(req.method==='OPTIONS')return json(res,200,{});
-  if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,boardsSnapshot());
+  if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
   if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
   req.on('end',()=>{
@@ -211,11 +224,12 @@ const server=http.createServer((req,res)=>{
       const room=pickRoom();
       const s=makeSnake(name,'#45e8d4',false);
       s.id='p'+(nextId++);s.events=[];s.lastSeen=Date.now();
+      s.addQ=[];s.delQ=[];s.lastBoardsTs=0;
       /* simulated entry economics: 20 burn, 10 team, 70 pool (real ones move on-chain) */
       boards.burn+=20;boards.pool+=70;dirty=true;
       room.players.set(s.id,s);
       return json(res,200,{id:s.id,room:room.id,
-        foods:[...room.foods.values()],snakes:snakesSnapshot(room),...boardsSnapshot()});
+        foods:[...room.foods.values()],snakes:snakesSnapshot(room),...cachedBoards()});
     }
     if(req.method==='POST'&&req.url==='/input'){
       let room=null,p=null;
@@ -243,8 +257,16 @@ const server=http.createServer((req,res)=>{
       p.lastSeen=nowT;
       const ev=p.events;p.events=[];
       const resp={you:{alive:p.alive,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak)},
-        snakes:snakesSnapshot(room),foodAdd:room.foodAdd.splice(0),foodDel:room.foodDel.splice(0),
-        events:ev,...boardsSnapshot()};
+        snakes:snakesSnapshot(room),events:ev};
+      if(p.addQ.length>400||p.delQ.length>300){
+        /* queue overflow (long stall): full food resync instead of diffs */
+        p.addQ=[];p.delQ=[];
+        resp.foods=[...room.foods.values()];
+      }else{
+        resp.foodAdd=p.addQ.splice(0);resp.foodDel=p.delQ.splice(0);
+      }
+      /* rankings are heavy: send them every ~3s per player, not per packet */
+      if(nowT-p.lastBoardsTs>3000){p.lastBoardsTs=nowT;Object.assign(resp,cachedBoards());}
       return json(res,200,resp);
     }
     if(req.method==='POST'&&req.url==='/leave'){
