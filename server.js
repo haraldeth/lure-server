@@ -30,12 +30,15 @@ const BOARDS_FILE=process.env.BOARDS_FILE||'./boards.json';
 let boards={day:{},all:{},dayId:epochId(),pool:0,burn:0};
 function epochId(){const d=new Date();return d.getUTCFullYear()*10000+(d.getUTCMonth()+1)*100+d.getUTCDate();}
 try{const j=JSON.parse(fs.readFileSync(BOARDS_FILE,'utf8'));if(j&&j.all)boards=j;}catch(e){}
+for(const b of [boards.day,boards.all])for(const n of BOT_NAMES)delete b[n];
 function rollDay(){const id=epochId();if(id!==boards.dayId){boards.dayId=id;boards.day={};boards.pool=0;boards.burn=0;saveBoards();}}
 let dirty=false;
 function saveBoards(){try{fs.writeFileSync(BOARDS_FILE,JSON.stringify(boards));}catch(e){}}
 setInterval(()=>{if(dirty){dirty=false;saveBoards();}},15000);
+const BOT_SET=new Set(BOT_NAMES);
 function recordScore(name,score){
   rollDay();score=Math.round(score);
+  if(BOT_SET.has(name))return; /* tournament boards are humans-only */
   if(!(score>0))return;
   if(!(boards.day[name]>=score))boards.day[name]=score;
   if(!(boards.all[name]>=score))boards.all[name]=score;
@@ -197,6 +200,9 @@ const server=http.createServer((req,res)=>{
   req.on('end',()=>{
     let d={};try{d=JSON.parse(body||'{}');}catch(e){return json(res,400,{error:'bad json'});}
     if(req.method==='POST'&&req.url==='/join'){
+      /* abuse guards: hard caps so join-spam cannot exhaust server memory */
+      let totalPlayers=0;for(const r of rooms)totalPlayers+=r.players.size;
+      if(totalPlayers>=2000||rooms.length>=60)return json(res,503,{error:'server full'});
       const name=String(d.name||'ANON').replace(/[<>&"]/g,'').toUpperCase().slice(0,14)||'ANON';
       const room=pickRoom();
       const s=makeSnake(name,'#45e8d4',false);
