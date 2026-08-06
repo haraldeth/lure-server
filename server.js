@@ -100,13 +100,17 @@ function step(room,dt){
         if(dx*dx+dy*dy<dodge){target=Math.atan2(b.y-p.y,b.x-p.x)+rand(-(1-b.skill)*.9,(1-b.skill)*.9);break;}}}
     b.desired=target;
   }
-  /* movement */
+  /* movement: bots are server-driven; humans are client-driven (their
+     position arrives via /input), but their trail, boost drain and boost
+     orb drops still happen here so everyone sees them identically */
   for(const s of all){
-    const d=norm(s.desired-s.angle),tr=turnRate(s)*dt;
-    s.angle+=clamp(d,-tr,tr);
+    if(s.bot){
+      const d=norm(s.desired-s.angle),tr=turnRate(s)*dt;
+      s.angle+=clamp(d,-tr,tr);
+      const sp=((s.boost&&s.length>90)?260:165)*dt;
+      s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
+    }
     const boosting=s.boost&&s.length>90;
-    const sp=(boosting?260:165)*dt;
-    s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
     if(boosting){s.length=Math.max(80,s.length-14*dt);
       if(Math.random()<dt*6)spawnFood(room,s.x-Math.cos(s.angle)*headR(s)*3,s.y-Math.sin(s.angle)*headR(s)*3,3,s.color);}
     const lp=s.path[0],ml=Math.hypot(s.x-lp.x,s.y-lp.y);
@@ -217,9 +221,26 @@ const server=http.createServer((req,res)=>{
       let room=null,p=null;
       for(const r of rooms){if(r.players.has(d.id)){room=r;p=r.players.get(d.id);break;}}
       if(!p)return json(res,404,{error:'unknown player'});
-      p.lastSeen=Date.now();
-      if(p.alive){if(isFinite(d.angle))p.desired=d.angle;p.boost=!!d.boost;
-        if(p.length>p.peak)p.peak=p.length;}
+      const nowT=Date.now();
+      if(p.alive){
+        /* CLIENT-DRIVEN position: the player's screen is the truth for where
+           they are; the server validates it (speed clamp below blocks
+           teleports) and stays authoritative for eating, kills and length.
+           NOTE for the on-chain phase: full server-side movement validation
+           is part of the anti-cheat work already flagged in the tokenomics. */
+        if(isFinite(d.x)&&isFinite(d.y)){
+          const dtc=Math.min(1,(nowT-(p._lt||nowT))/1000)||0.08;
+          const maxd=300*dtc+80;
+          const dx=d.x-p.x,dy=d.y-p.y,dist=Math.hypot(dx,dy);
+          if(dist>maxd){p.x+=dx/dist*maxd;p.y+=dy/dist*maxd;}
+          else{p.x=d.x;p.y=d.y;}
+        }
+        if(isFinite(d.angle)){p.angle=d.angle;p.desired=d.angle;}
+        p.boost=!!d.boost;
+        if(p.length>p.peak)p.peak=p.length;
+      }
+      p._lt=nowT;
+      p.lastSeen=nowT;
       const ev=p.events;p.events=[];
       const resp={you:{alive:p.alive,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak)},
         snakes:snakesSnapshot(room),foodAdd:room.foodAdd.splice(0),foodDel:room.foodDel.splice(0),
