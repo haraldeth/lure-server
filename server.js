@@ -1,4 +1,4 @@
-/* LURE multiplayer game server — zero dependencies, deploy anywhere Node runs.
+/* LURE multiplayer game server â€” zero dependencies, deploy anywhere Node runs.
    Authoritative world: rooms of up to 40 real players (bots fill the gaps so
    the map is always alive), server-side physics, kills, corpse drops, GLOBAL
    daily + all-time rankings persisted to disk and shared by every device.
@@ -158,7 +158,8 @@ function kill(room,s,killer,how){
     const p=s.body[Math.floor(d/nOrbs*s.body.length)]||{x:s.x,y:s.y};
     spawnFood(room,p.x+rand(-14,14),p.y+rand(-14,14),per,s.color);}
   if(killer){killer.kills++;pushEvent(room,killer,{t:'kill',name:s.name,mass:Math.round(s.length)});}
-  recordScore(s.name,s.peak);
+  /* only HUMANS enter the global rankings: bots fill the map, never the podium */
+  if(!s.bot)recordScore(s.name,s.peak);
   if(s.bot){s.respawnT=rand(2.5,4.5);}
   else{s.deadHow=how;pushEvent(room,s,{t:'death',how,score:Math.round(s.peak)});}
 }
