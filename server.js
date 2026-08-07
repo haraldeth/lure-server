@@ -13,7 +13,7 @@ const fs = require('fs');
 const PORT = process.env.PORT || 8790;
 
 /* ---- constants (mirror the client) ---- */
-const WORLD_R=2500, START_LENGTH=60, FOOD_TARGET=330, MAX_FOOD=520;
+const WORLD_R=2500, START_LENGTH=60, FOOD_TARGET=330, MAX_FOOD=380;
 const ROOM_CAPACITY=40, BOT_FILL=12, TICK=1/20;
 const DROP_FRACTION=0.35;
 const BOT_NAMES=['ANGLER','KRAKEN','NAUTILUS','MANTA','VIPER','GLOWWORM','LEVIATHAN','DRIFTER','SIREN','ABYSSAL','LANTERN','EEL'];
@@ -117,8 +117,11 @@ function step(room,dt){
     const boosting=s.boost&&s.length>45;
     if(boosting){s.length=Math.max(80,s.length-14*dt);
       if(Math.random()<dt*6){
-        const hrb=headR(s),back=hrb*4.2+46; /* stays outside any eating radius */
-        spawnFood(room,s.x-Math.cos(s.angle)*back,s.y-Math.sin(s.angle)*back,3,s.color,s.bot?undefined:s.id);
+        /* drop at the TAIL TIP, exactly like slither.io: at the tail the
+           network delay is invisible and the orb can never be re-eaten by
+           your own head in the same instant */
+        const tail=(s.body&&s.body.length>1)?s.body[s.body.length-1]:{x:s.x-Math.cos(s.angle)*headR(s)*6,y:s.y-Math.sin(s.angle)*headR(s)*6};
+        spawnFood(room,tail.x+rand(-5,5),tail.y+rand(-5,5),3,s.color);
       }}
     const lp=s.path[0],ml=Math.hypot(s.x-lp.x,s.y-lp.y);
     if(ml>4){s.path.unshift({x:s.x,y:s.y});s.pathLen+=ml;
@@ -136,13 +139,15 @@ function step(room,dt){
   /* eating */
   for(const s of all){const hr=headR(s);
     for(const f of room.foods.values()){
-      const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.5+f.v*.3+20;
+      const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+14;
       if(dx*dx+dy*dy<rr*rr){
         const sizeM=1/(1+Math.max(0,s.length-START_LENGTH)/2600);
         s.length+=f.v*sizeM;
         room.foods.delete(f.i);for(const pl of room.players.values())pl.delQ.push(f.i);
       }}}
-  while(room.foods.size<FOOD_TARGET)spawnFood(room);
+  room.regen=(room.regen||0)+8*dt; /* gradual regeneration: max 8 orbs/s */
+  while(room.foods.size<FOOD_TARGET&&room.regen>=1){room.regen-=1;spawnFood(room);}
+  if(room.foods.size>=FOOD_TARGET)room.regen=0;
   if(room.foods.size>MAX_FOOD){const it=room.foods.keys();
     while(room.foods.size>MAX_FOOD){const k=it.next().value;room.foods.delete(k);for(const pl of room.players.values())pl.delQ.push(k);}}
   /* collisions: head vs others' bodies + wall */
@@ -156,7 +161,10 @@ function step(room,dt){
       if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
       const bstep=Math.max(10,o.length/80);
       const rr=hr+headR(o)*.8+bstep*.5;
-      for(const p of o.body){const dx=p.x-s.x,dy=p.y-s.y;
+      /* NECK ZONE skip: head-vs-neck contact does not kill; only a clean hit
+         on the other's actual body does. The rammer dies, the rammed lives. */
+      const neckN=Math.ceil(headR(o)*2.2/bstep)+1;
+      for(let bi=neckN;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
         if(dx*dx+dy*dy<rr*rr){kill(room,s,o,o.name);break;}}
       if(!s.alive)break;
     }
