@@ -111,12 +111,15 @@ function step(room,dt){
     if(s.bot){
       const d=norm(s.desired-s.angle),tr=turnRate(s)*dt;
       s.angle+=clamp(d,-tr,tr);
-      const sp=((s.boost&&s.length>90)?260:165)*dt;
+      const sp=((s.boost&&s.length>45)?260:165)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
     }
-    const boosting=s.boost&&s.length>90;
+    const boosting=s.boost&&s.length>45;
     if(boosting){s.length=Math.max(80,s.length-14*dt);
-      if(Math.random()<dt*6)spawnFood(room,s.x-Math.cos(s.angle)*headR(s)*3,s.y-Math.sin(s.angle)*headR(s)*3,3,s.color,s.bot?undefined:s.id);}
+      if(Math.random()<dt*6){
+        const hrb=headR(s),back=hrb*4.2+46; /* stays outside any eating radius */
+        spawnFood(room,s.x-Math.cos(s.angle)*back,s.y-Math.sin(s.angle)*back,3,s.color,s.bot?undefined:s.id);
+      }}
     const lp=s.path[0],ml=Math.hypot(s.x-lp.x,s.y-lp.y);
     if(ml>4){s.path.unshift({x:s.x,y:s.y});s.pathLen+=ml;
       while(s.pathLen>s.length+220&&s.path.length>2){
@@ -256,6 +259,26 @@ const server=http.createServer((req,res)=>{
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
   req.on('end',()=>{
     let d={};try{d=JSON.parse(body||'{}');}catch(e){return json(res,400,{error:'bad json'});}
+    if(req.method==='POST'&&req.url==='/boards/seed'){
+      /* self-healing rankings for the FREE-TIER phase: a client that holds a
+         fuller cached board re-seeds a freshly-woken (wiped) server, so all
+         devices converge again. Hardened: sanitized names, score/entry caps.
+         IMPORTANT: set ALLOW_SEED=0 in the environment THE DAY real prizes
+         exist; from then on the server's own record must be the only truth
+         (a paid persistent disk replaces this mechanism). */
+      if(process.env.ALLOW_SEED==='0')return json(res,403,{error:'seeding disabled'});
+      const clean=b=>(Array.isArray(b)?b:[]).slice(0,200)
+        .map(e=>({name:String((e&&e.name)||'').replace(/[<>&"]/g,'').toUpperCase().slice(0,14),
+                  score:Math.min(50000,Math.max(0,Math.round((e&&e.score)||0)))}))
+        .filter(e=>e.name&&e.score>0&&!BOT_SET.has(e.name));
+      rollDay();
+      for(const e of clean(d.day))if(!(boards.day[e.name]>=e.score))boards.day[e.name]=e.score;
+      for(const e of clean(d.all))if(!(boards.all[e.name]>=e.score))boards.all[e.name]=e.score;
+      if(isFinite(d.pool)&&d.pool>boards.pool&&d.pool<1e7)boards.pool=Math.round(d.pool);
+      if(isFinite(d.burn)&&d.burn>boards.burn&&d.burn<1e7)boards.burn=Math.round(d.burn);
+      dirty=true;_bCache=null;
+      return json(res,200,{ok:1});
+    }
     if(req.method==='POST'&&req.url==='/join'){
       /* abuse guards: hard caps so join-spam cannot exhaust server memory */
       let totalPlayers=0;for(const r of rooms)totalPlayers+=r.players.size;
@@ -307,5 +330,6 @@ const server=http.createServer((req,res)=>{
     json(res,404,{error:'not found'});
   });
 });
+process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
 module.exports={server,rooms,boards};
