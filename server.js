@@ -176,7 +176,7 @@ function step(room,dt){
       const rr=hr+headR(o)*.8+bstep*.5;
       /* NECK ZONE skip: head-vs-neck contact does not kill; only a clean hit
          on the other's actual body does. The rammer dies, the rammed lives. */
-      const neckN=Math.ceil(headR(o)*2.2/bstep)+1;
+      const neckN=Math.ceil((headR(o)*3.2+14)/bstep)+1;
       for(let bi=neckN;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
         if(dx*dx+dy*dy<rr*rr){kill(room,s,o,o.name);break;}}
       if(!s.alive)break;
