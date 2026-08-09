@@ -13,7 +13,7 @@ const fs = require('fs');
 const PORT = process.env.PORT || 8790;
 
 /* ---- constants (mirror the client) ---- */
-const WORLD_R=2500, START_LENGTH=60, FOOD_TARGET=330, MAX_FOOD=380;
+const WORLD_R=2500, START_LENGTH=60, FOOD_TARGET=260, MAX_FOOD=300;
 const ROOM_CAPACITY=40, BOT_FILL=12, TICK=1/20;
 const DROP_FRACTION=0.35;
 const BOT_NAMES=['ANGLER','KRAKEN','NAUTILUS','MANTA','VIPER','GLOWWORM','LEVIATHAN','DRIFTER','SIREN','ABYSSAL','LANTERN','EEL'];
@@ -52,7 +52,7 @@ const rooms=[];
 function newRoom(){
   const room={players:new Map(),bots:[],foods:new Map(),nextFood:1,id:rooms.length};
   for(let i=0;i<FOOD_TARGET;i++)spawnFood(room);
-  for(let i=0;i<BOT_FILL;i++)spawnBot(room,i);
+  for(let i=0;i<BOT_FILL;i++){spawnBot(room,i);placeAt(room.bots[i],safeSpawn(room));}
   rooms.push(room);return room;
 }
 function pickRoom(){for(const r of rooms)if(r.players.size<ROOM_CAPACITY)return r;return newRoom();}
@@ -67,10 +67,23 @@ function spawnFood(room,x,y,v,c,exceptId){
   for(const pl of room.players.values())if(pl.id!==exceptId)pl.addQ.push(f);
   return f;
 }
+function safeSpawn(room){
+  /* pick the candidate farthest from every living head: nobody ever spawns
+     on top of someone (that caused instant unfair deaths and pass-throughs) */
+  let best=null,bd=-1;
+  for(let t=0;t<24;t++){
+    const p=diskPoint(WORLD_R*.8);let md=1e18;
+    for(const s of [...room.players.values(),...room.bots])if(s.alive){
+      const dx=s.x-p.x,dy=s.y-p.y,d=dx*dx+dy*dy;if(d<md)md=d;}
+    if(md>bd){bd=md;best=p;}
+  }
+  return best||diskPoint(WORLD_R*.6);
+}
+function placeAt(s,p){s.x=p.x;s.y=p.y;s.path=[{x:p.x,y:p.y}];s.pathLen=0;s.body=[{x:p.x,y:p.y}];}
 function makeSnake(name,color,isBot){
   const p=diskPoint(WORLD_R*.6);
   return{name,color,bot:!!isBot,x:p.x,y:p.y,angle:rand(0,6.28),desired:rand(0,6.28),
-    length:START_LENGTH+(isBot?rand(0,120):0),peak:START_LENGTH,boost:false,alive:true,
+    length:START_LENGTH+(isBot?rand(0,120):0),peak:START_LENGTH,val:75,boost:false,alive:true,
     path:[{x:p.x,y:p.y}],pathLen:0,body:[{x:p.x,y:p.y}],kills:0,respawnT:0,
     skill:isBot?(Math.random()<.3?rand(.8,1):Math.random()<.6?rand(.45,.75):rand(.2,.4)):1,
     wx:0,wy:0,wT:0};
@@ -83,7 +96,7 @@ function step(room,dt){
   const all=[...room.players.values(),...room.bots].filter(s=>s.alive);
   /* bot AI (simplified port of the client AI) */
   for(const b of room.bots){
-    if(!b.alive){b.respawnT-=dt;if(b.respawnT<=0){Object.assign(b,makeSnake(b.name,b.color,true),{id:b.id});}continue;}
+    if(!b.alive){b.respawnT-=dt;if(b.respawnT<=0){Object.assign(b,makeSnake(b.name,b.color,true),{id:b.id});placeAt(b,safeSpawn(room));}continue;}
     b.wT-=dt;
     const wd=(b.wx-b.x)**2+(b.wy-b.y)**2;
     if(b.wT<=0||wd<120*120){b.wT=rand(3,6);const p=diskPoint(WORLD_R*(Math.random()<.2?.95:.8));b.wx=p.x;b.wy=p.y;}
@@ -111,7 +124,7 @@ function step(room,dt){
     if(s.bot){
       const d=norm(s.desired-s.angle),tr=turnRate(s)*dt;
       s.angle+=clamp(d,-tr,tr);
-      const sp=((s.boost&&s.length>45)?260:165)*dt;
+      const sp=((s.boost&&s.length>45)?290:185)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
     }
     const boosting=s.boost&&s.length>45;
@@ -139,13 +152,13 @@ function step(room,dt){
   /* eating */
   for(const s of all){const hr=headR(s);
     for(const f of room.foods.values()){
-      const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+14;
+      const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+20;
       if(dx*dx+dy*dy<rr*rr){
         const sizeM=1/(1+Math.max(0,s.length-START_LENGTH)/2600);
         s.length+=f.v*sizeM;
         room.foods.delete(f.i);for(const pl of room.players.values())pl.delQ.push(f.i);
       }}}
-  room.regen=(room.regen||0)+8*dt; /* gradual regeneration: max 8 orbs/s */
+  room.regen=(room.regen||0)+6*dt; /* gradual regeneration: max 8 orbs/s */
   while(room.foods.size<FOOD_TARGET&&room.regen>=1){room.regen-=1;spawnFood(room);}
   if(room.foods.size>=FOOD_TARGET)room.regen=0;
   if(room.foods.size>MAX_FOOD){const it=room.foods.keys();
@@ -179,17 +192,26 @@ function kill(room,s,killer,how){
   for(let d=0;d<nOrbs;d++){
     const p=s.body[Math.floor(d/nOrbs*s.body.length)]||{x:s.x,y:s.y};
     spawnFood(room,p.x+rand(-14,14),p.y+rand(-14,14),per,s.color);}
-  if(killer){killer.kills++;pushEvent(room,killer,{t:'kill',name:s.name,mass:Math.round(s.length)});}
+  if(killer){
+    killer.kills++;
+    /* per-match economy: the killer captures 60% of the victim's carried
+       value, 5% of it burns, the rest vanishes with the corpse. Value only
+       ever moves BETWEEN players, food never mints it: no farming. */
+    const gain=Math.round(s.val*0.60),burned=Math.round(s.val*0.05);
+    killer.val+=gain;boards.burn+=burned;dirty=true;
+    pushEvent(room,killer,{t:'kill',name:s.name,mass:Math.round(s.length),g:gain});
+  }
   /* only HUMANS enter the global rankings: bots fill the map, never the podium */
   if(!s.bot)recordScore(s.name,s.peak);
   if(s.bot){s.respawnT=rand(2.5,4.5);}
-  else{s.deadHow=how;pushEvent(room,s,{t:'death',how,score:Math.round(s.peak)});}
+  else{s.deadHow=how;pushEvent(room,s,{t:'death',how,score:Math.round(s.peak),lost:Math.round(s.val)});}
+  s.val=0;
 }
 function pushEvent(room,s,ev){if(!s.bot){const p=room.players.get(s.id);if(p)p.events.push(ev);}}
 
 let pushT=0;
 function buildSnapshot(room,p,snap){
-  const msg={you:{alive:p.alive,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak)},
+  const msg={you:{alive:p.alive,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val)},
     snakes:snap,events:p.events.splice(0)};
   if(p.addQ.length>400||p.delQ.length>300){
     p.addQ=[];p.delQ=[];
@@ -297,7 +319,8 @@ const server=http.createServer((req,res)=>{
       s.id='p'+(nextId++);s.events=[];s.lastSeen=Date.now();
       s.addQ=[];s.delQ=[];s.lastBoardsTs=0;
       /* simulated entry economics: 20 burn, 10 team, 70 pool (real ones move on-chain) */
-      boards.burn+=20;boards.pool+=70;dirty=true;
+      boards.burn+=15;boards.pool+=75;dirty=true; /* pool = staked in play today */
+      placeAt(s,safeSpawn(room));
       room.players.set(s.id,s);
       return json(res,200,{proto:2,id:s.id,room:room.id,
         foods:[...room.foods.values()],snakes:snakesSnapshot(room),...cachedBoards()});
@@ -315,7 +338,7 @@ const server=http.createServer((req,res)=>{
            is part of the anti-cheat work already flagged in the tokenomics. */
         if(isFinite(d.x)&&isFinite(d.y)){
           const dtc=Math.min(1,(nowT-(p._lt||nowT))/1000)||0.08;
-          const maxd=300*dtc+80;
+          const maxd=340*dtc+80;
           const dx=d.x-p.x,dy=d.y-p.y,dist=Math.hypot(dx,dy);
           if(dist>maxd){p.x+=dx/dist*maxd;p.y+=dy/dist*maxd;}
           else{p.x=d.x;p.y=d.y;}
@@ -331,8 +354,8 @@ const server=http.createServer((req,res)=>{
     }
     if(req.method==='POST'&&req.url==='/leave'){
       for(const r of rooms){const p=r.players.get(d.id);
-        if(p){if(p.alive)recordScore(p.name,p.peak);const sc=Math.round(p.peak);
-          r.players.delete(d.id);return json(res,200,{score:sc});}}
+        if(p){if(p.alive)recordScore(p.name,p.peak);const sc=Math.round(p.peak),cv=p.alive?Math.round(p.val):0;
+          r.players.delete(d.id);return json(res,200,{score:sc,val:cv});}}
       return json(res,200,{score:0});
     }
     json(res,404,{error:'not found'});
