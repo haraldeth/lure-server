@@ -124,10 +124,10 @@ function step(room,dt){
     if(s.bot){
       const d=norm(s.desired-s.angle),tr=turnRate(s)*dt;
       s.angle+=clamp(d,-tr,tr);
-      const sp=((s.boost&&s.length>45)?290:185)*dt;
+      const sp=((s.boost&&s.length>80)?290:185)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
     }
-    const boosting=s.boost&&s.length>45;
+    const boosting=s.boost&&s.length>80; /* gate == drain floor: no sprint at minimum size, ever */
     if(boosting){s.length=Math.max(80,s.length-14*dt);
       if(Math.random()<dt*6){
         /* drop at the TAIL TIP, exactly like slither.io: at the tail the
@@ -166,6 +166,16 @@ function step(room,dt){
   /* collisions: head vs others' bodies + wall */
   for(const s of all){
     if(!s.alive)continue;
+    if(!s.bot){
+      /* HUMANS die on their own screen (client-authoritative, see /died):
+         killing them here with a position 150-250ms stale produced deaths
+         their eyes rightly called unfair. The server only enforces the wall
+         with a margin, plus the inactivity timeout, as safety nets.
+         TOKEN PHASE: the attester must re-simulate matches from input logs
+         before signing any cashout, restoring full server authority. */
+      if(Math.hypot(s.x,s.y)>WORLD_R+60)kill(room,s,null,'the wall');
+      continue;
+    }
     if(Math.hypot(s.x,s.y)>WORLD_R){kill(room,s,null,'the wall');continue;}
     const hr=headR(s);
     for(const o of all){
@@ -179,13 +189,9 @@ function step(room,dt){
          normal body hit: without the gate, the neck was a crossable blind
          spot behind every head. */
       const hdx2=o.x-s.x,hdy2=o.y-s.y;
-      const headsClose=(hdx2*hdx2+hdy2*hdy2)<Math.pow((hr+headR(o))*1.8+10,2);
-      let neckN=headsClose?(Math.ceil((headR(o)*3.2+14)/bstep)+1):1;
-      /* lag compensation for HUMAN victims: their reported position is
-         150-250ms old, so the stretch of rival body that swept over that
-         stale point must not kill them (the rival's head hitting THEIR body
-         still does: the cutter wins the cut, slither-style). */
-      if(!s.bot)neckN=Math.max(neckN,Math.ceil(55/bstep)+1);
+      /* tight gate: only a true face-to-face ram forgives the neck */
+      const headsClose=(hdx2*hdx2+hdy2*hdy2)<Math.pow((hr+headR(o))*1.2+6,2);
+      const neckN=headsClose?(Math.ceil((headR(o)*2.2+8)/bstep)+1):1;
       for(let bi=neckN;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
         if(dx*dx+dy*dy<rr*rr){kill(room,s,o,o.name);break;}}
       if(!s.alive)break;
@@ -295,7 +301,7 @@ const server=http.createServer((req,res)=>{
     return;
   }
   if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
-  if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:2,rooms:rooms.length});
+  if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:4,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
   req.on('end',()=>{
     let d={};try{d=JSON.parse(body||'{}');}catch(e){return json(res,400,{error:'bad json'});}
@@ -319,6 +325,30 @@ const server=http.createServer((req,res)=>{
       dirty=true;_bCache=null;
       return json(res,200,{ok:1});
     }
+    if(req.method==='POST'&&req.url==='/died'){
+      /* client-authoritative human death (demo phase): validate that the
+         reported killer exists, is alive, and is plausibly in range before
+         crediting the capture. Implausible reports still kill the reporter
+         (their own death needs no proof) but credit nobody. */
+      let room=null,p=null;
+      for(const r of rooms){if(r.players.has(d.id)){room=r;p=r.players.get(d.id);break;}}
+      if(!p)return json(res,404,{error:'unknown player'});
+      if(p.alive){
+        let killer=null;
+        if(d.killer!==undefined&&d.killer!==null){
+          for(const c of [...room.players.values(),...room.bots]){
+            if(c.id===d.killer&&c.alive&&c!==p){
+              const kdx=c.x-p.x,kdy=c.y-p.y;
+              if(kdx*kdx+kdy*kdy<Math.pow(p.length+c.length+500,2))killer=c;
+              break;
+            }
+          }
+        }
+        const how=String(d.how||'').replace(/[<>&"]/g,'').slice(0,20)||'collision';
+        kill(room,p,killer,how);
+      }
+      return json(res,200,{ok:1});
+    }
     if(req.method==='POST'&&req.url==='/join'){
       /* abuse guards: hard caps so join-spam cannot exhaust server memory */
       let totalPlayers=0;for(const r of rooms)totalPlayers+=r.players.size;
@@ -332,7 +362,7 @@ const server=http.createServer((req,res)=>{
       boards.burn+=15;boards.pool+=75;dirty=true; /* pool = staked in play today */
       placeAt(s,safeSpawn(room));
       room.players.set(s.id,s);
-      return json(res,200,{proto:2,id:s.id,room:room.id,
+      return json(res,200,{proto:4,id:s.id,room:room.id,
         foods:[...room.foods.values()],snakes:snakesSnapshot(room),...cachedBoards()});
     }
     if(req.method==='POST'&&req.url==='/input'){
@@ -371,9 +401,6 @@ const server=http.createServer((req,res)=>{
     json(res,404,{error:'not found'});
   });
 });
-process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
-server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
-module.exports={server,rooms,boards};
 process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
 module.exports={server,rooms,boards};
