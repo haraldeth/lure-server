@@ -180,7 +180,12 @@ function step(room,dt){
          spot behind every head. */
       const hdx2=o.x-s.x,hdy2=o.y-s.y;
       const headsClose=(hdx2*hdx2+hdy2*hdy2)<Math.pow((hr+headR(o))*1.8+10,2);
-      const neckN=headsClose?(Math.ceil((headR(o)*3.2+14)/bstep)+1):1;
+      let neckN=headsClose?(Math.ceil((headR(o)*3.2+14)/bstep)+1):1;
+      /* lag compensation for HUMAN victims: their reported position is
+         150-250ms old, so the stretch of rival body that swept over that
+         stale point must not kill them (the rival's head hitting THEIR body
+         still does: the cutter wins the cut, slither-style). */
+      if(!s.bot)neckN=Math.max(neckN,Math.ceil(55/bstep)+1);
       for(let bi=neckN;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
         if(dx*dx+dy*dy<rr*rr){kill(room,s,o,o.name);break;}}
       if(!s.alive)break;
@@ -284,6 +289,7 @@ const server=http.createServer((req,res)=>{
     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache',
       'Access-Control-Allow-Origin':'*','Connection':'keep-alive','X-Accel-Buffering':'no'});
     res.write('retry: 2000\n\n');
+    if(sp.sse){try{sp.sse.end();}catch(e){}} /* one stream per player: closing any previous one */
     sp.sse=res;
     req.on('close',()=>{if(sp.sse===res)sp.sse=null;});
     return;
@@ -365,6 +371,9 @@ const server=http.createServer((req,res)=>{
     json(res,404,{error:'not found'});
   });
 });
+process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
+server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
+module.exports={server,rooms,boards};
 process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
 module.exports={server,rooms,boards};
