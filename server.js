@@ -174,9 +174,13 @@ function step(room,dt){
       if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
       const bstep=Math.max(10,o.length/80);
       const rr=hr+headR(o)*.8+bstep*.5;
-      /* NECK ZONE skip: head-vs-neck contact does not kill; only a clean hit
-         on the other's actual body does. The rammer dies, the rammed lives. */
-      const neckN=Math.ceil((headR(o)*3.2+14)/bstep)+1;
+      /* NECK ZONE, head-proximity gated: forgiving only when the two heads
+         are close (a real ram). Crossing a neck with the head far away is a
+         normal body hit: without the gate, the neck was a crossable blind
+         spot behind every head. */
+      const hdx2=o.x-s.x,hdy2=o.y-s.y;
+      const headsClose=(hdx2*hdx2+hdy2*hdy2)<Math.pow((hr+headR(o))*1.8+10,2);
+      const neckN=headsClose?(Math.ceil((headR(o)*3.2+14)/bstep)+1):1;
       for(let bi=neckN;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
         if(dx*dx+dy*dy<rr*rr){kill(room,s,o,o.name);break;}}
       if(!s.alive)break;
