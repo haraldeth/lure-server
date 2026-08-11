@@ -36,12 +36,22 @@ let dirty=false;
 function saveBoards(){try{fs.writeFileSync(BOARDS_FILE,JSON.stringify(boards));}catch(e){}}
 setInterval(()=>{if(dirty){dirty=false;saveBoards();}},15000);
 const BOT_SET=new Set(BOT_NAMES);
+const BOARD_MAX=500; /* memory bound: keep only the top N names per board */
+function trimBoard(b){
+  const keys=Object.keys(b);
+  if(keys.length<=BOARD_MAX)return b;
+  const top=keys.sort((a,c)=>b[c]-b[a]).slice(0,BOARD_MAX);
+  const out={};for(const k of top)out[k]=b[k];
+  return out;
+}
 function recordScore(name,score){
   rollDay();score=Math.round(score);
   if(BOT_SET.has(name))return; /* tournament boards are humans-only */
   if(!(score>0))return;
   if(!(boards.day[name]>=score))boards.day[name]=score;
   if(!(boards.all[name]>=score))boards.all[name]=score;
+  if(Object.keys(boards.all).length>BOARD_MAX+50)boards.all=trimBoard(boards.all);
+  if(Object.keys(boards.day).length>BOARD_MAX+50)boards.day=trimBoard(boards.day);
   dirty=true;
 }
 function topList(map,n){return Object.entries(map).map(([name,score])=>({name,score}))
@@ -149,15 +159,31 @@ function step(room,dt){
         s.body.push({x:a.x+(b2.x-a.x)*k,y:a.y+(b2.y-a.y)*k});nx+=stp;}
       acc+=L;}
   }
-  /* eating */
-  for(const s of all){const hr=headR(s);
-    for(const f of room.foods.values()){
-      const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+20;
-      if(dx*dx+dy*dy<rr*rr){
-        const sizeM=1/(1+Math.max(0,s.length-START_LENGTH)/2600);
-        s.length+=f.v*sizeM;
-        room.foods.delete(f.i);for(const pl of room.players.values())pl.delQ.push(f.i);
-      }}}
+  /* eating, accelerated by a spatial grid (200u cells): each head only
+     tests food in its own cell and the 8 neighbours, not all 300 orbs.
+     This is the hot loop that pinned the CPU on the free tier. */
+  const CELL=200,grid=new Map();
+  for(const f of room.foods.values()){
+    const gx=Math.floor(f.x/CELL),gy=Math.floor(f.y/CELL),key=gx+','+gy;
+    let cell=grid.get(key);if(!cell){cell=[];grid.set(key,cell);}
+    cell.push(f);
+  }
+  for(const s of all){
+    if(!s.alive)continue;
+    const hr=headR(s),gx=Math.floor(s.x/CELL),gy=Math.floor(s.y/CELL);
+    for(let cx=gx-1;cx<=gx+1;cx++)for(let cy=gy-1;cy<=gy+1;cy++){
+      const cell=grid.get(cx+','+cy);if(!cell)continue;
+      for(const f of cell){
+        if(!room.foods.has(f.i))continue;
+        const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+20;
+        if(dx*dx+dy*dy<rr*rr){
+          const sizeM=1/(1+Math.max(0,s.length-START_LENGTH)/2600);
+          s.length+=f.v*sizeM;
+          room.foods.delete(f.i);for(const pl of room.players.values())pl.delQ.push(f.i);
+        }
+      }
+    }
+  }
   room.regen=(room.regen||0)+6*dt; /* gradual regeneration: max 8 orbs/s */
   while(room.foods.size<FOOD_TARGET&&room.regen>=1){room.regen-=1;spawnFood(room);}
   if(room.foods.size>=FOOD_TARGET)room.regen=0;
@@ -322,6 +348,8 @@ const server=http.createServer((req,res)=>{
       for(const e of clean(d.all))if(!(boards.all[e.name]>=e.score))boards.all[e.name]=e.score;
       if(isFinite(d.pool)&&d.pool>boards.pool&&d.pool<1e7)boards.pool=Math.round(d.pool);
       if(isFinite(d.burn)&&d.burn>boards.burn&&d.burn<1e7)boards.burn=Math.round(d.burn);
+      if(Object.keys(boards.all).length>BOARD_MAX+50)boards.all=trimBoard(boards.all);
+      if(Object.keys(boards.day).length>BOARD_MAX+50)boards.day=trimBoard(boards.day);
       dirty=true;_bCache=null;
       return json(res,200,{ok:1});
     }
@@ -417,7 +445,7 @@ const server=http.createServer((req,res)=>{
 });
 process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
-module.exports={server,rooms,boards};
+module.exports={server,rooms,boards,step,TICK};
 process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
 module.exports={server,rooms,boards};
