@@ -252,7 +252,7 @@ function pushEvent(room,s,ev){if(!s.bot){const p=room.players.get(s.id);if(p)p.e
 
 let pushT=0;
 function buildSnapshot(room,p,snap){
-  const msg={you:{alive:p.alive,x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10,a:p.angle,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val)},
+  const msg={t:Math.round(room.simT*1000),you:{alive:p.alive,x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10,a:p.angle,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val)},
     snakes:snap,events:p.events.splice(0)};
   if(p.addQ.length>400||p.delQ.length>300){
     p.addQ=[];p.delQ=[];
