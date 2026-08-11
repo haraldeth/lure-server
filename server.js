@@ -221,11 +221,9 @@ function step(room,dt){
          are close (a real ram). Crossing a neck with the head far away is a
          normal body hit: without the gate, the neck was a crossable blind
          spot behind every head. */
-      const hdx2=o.x-s.x,hdy2=o.y-s.y;
-      /* tight gate: only a true face-to-face ram forgives the neck */
-      const headsClose=(hdx2*hdx2+hdy2*hdy2)<Math.pow((hr+headR(o))*1.2+6,2);
-      const neckN=headsClose?(Math.ceil((headR(o)*2.2+8)/bstep)+1):1;
-      for(let bi=neckN;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
+      /* THE ABSOLUTE RULE for bots too: head touches any body point =>
+         dies. No neck forgiveness: forgiveness zones are corridors. */
+      for(let bi=1;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
         if(dx*dx+dy*dy<rr*rr){kill(room,s,o,o.name);break;}}
       if(!s.alive)break;
     }
