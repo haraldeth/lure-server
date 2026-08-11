@@ -124,11 +124,11 @@ function step(room,dt){
     if(s.bot){
       const d=norm(s.desired-s.angle),tr=turnRate(s)*dt;
       s.angle+=clamp(d,-tr,tr);
-      const sp=((s.boost&&s.length>80)?290:185)*dt;
+      const sp=((s.boost&&s.length>64)?290:185)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
     }
-    const boosting=s.boost&&s.length>80; /* gate == drain floor: no sprint at minimum size, ever */
-    if(boosting){s.length=Math.max(80,s.length-14*dt);
+    const boosting=s.boost&&s.length>64; /* gate == drain floor: one orb after spawning unlocks sprint, slither-style */
+    if(boosting){s.length=Math.max(64,s.length-14*dt);
       if(Math.random()<dt*6){
         /* drop at the TAIL TIP, exactly like slither.io: at the tail the
            network delay is invisible and the orb can never be re-eaten by
@@ -301,7 +301,7 @@ const server=http.createServer((req,res)=>{
     return;
   }
   if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
-  if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:4,rooms:rooms.length});
+  if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:5,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
   req.on('end',()=>{
     let d={};try{d=JSON.parse(body||'{}');}catch(e){return json(res,400,{error:'bad json'});}
@@ -362,8 +362,22 @@ const server=http.createServer((req,res)=>{
       boards.burn+=15;boards.pool+=75;dirty=true; /* pool = staked in play today */
       placeAt(s,safeSpawn(room));
       room.players.set(s.id,s);
-      return json(res,200,{proto:4,id:s.id,room:room.id,
-        foods:[...room.foods.values()],snakes:snakesSnapshot(room),...cachedBoards()});
+      return json(res,200,{proto:5,id:s.id,room:room.id,
+        foods:[...room.foods.values()],
+        snakes:snakesSnapshot(room).map(sn=>{
+          /* seed geometry: a compact polyline of the ACTUAL body (head
+             first), so a newly-met snake collides and renders complete
+             from frame one instead of growing a tail as you observe it */
+          const src=[...room.players.values(),...room.bots].find(x=>x.id===sn.i);
+          if(src&&src.body&&src.body.length>1){
+            const step=Math.max(1,Math.ceil(src.body.length/50));
+            const b=[];
+            for(let bi=0;bi<src.body.length;bi+=step)
+              b.push([Math.round(src.body[bi].x),Math.round(src.body[bi].y)]);
+            sn.b=b;
+          }
+          return sn;
+        }),...cachedBoards()});
     }
     if(req.method==='POST'&&req.url==='/input'){
       let room=null,p=null;
@@ -401,6 +415,9 @@ const server=http.createServer((req,res)=>{
     json(res,404,{error:'not found'});
   });
 });
+process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
+server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
+module.exports={server,rooms,boards};
 process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
 module.exports={server,rooms,boards};
