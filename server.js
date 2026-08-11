@@ -77,6 +77,14 @@ function spawnFood(room,x,y,v,c,exceptId){
   for(const pl of room.players.values())if(pl.id!==exceptId)pl.addQ.push(f);
   return f;
 }
+function bodyPolyline(src){
+  /* compact real-body polyline (head first), used by /join and /bodies */
+  if(!src||!src.body||src.body.length<2)return null;
+  const step=Math.max(1,Math.ceil(src.body.length/50)),b=[];
+  for(let bi=0;bi<src.body.length;bi+=step)
+    b.push([Math.round(src.body[bi].x),Math.round(src.body[bi].y)]);
+  return b;
+}
 function safeSpawn(room){
   /* pick the candidate farthest from every living head: nobody ever spawns
      on top of someone (that caused instant unfair deaths and pass-throughs) */
@@ -326,6 +334,21 @@ const server=http.createServer((req,res)=>{
     req.on('close',()=>{if(sp.sse===res)sp.sse=null;});
     return;
   }
+  if(req.method==='GET'&&req.url.startsWith('/bodies')){
+    /* geometry resync after a free-tier stall: the client re-seeds every
+       remote body from the REAL server geometry instead of colliding
+       against frozen data or fabricated straight catch-up segments */
+    const q=new URL(req.url,'http://x').searchParams.get('id')||'';
+    let room=null;for(const r of rooms)if(r.players.has(q)){room=r;break;}
+    if(!room)return json(res,404,{error:'unknown player'});
+    const out=[];
+    for(const src of [...room.players.values(),...room.bots]){
+      if(!src.alive)continue;
+      const b=bodyPolyline(src);
+      if(b)out.push({i:src.id,b});
+    }
+    return json(res,200,{bodies:out});
+  }
   if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
   if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:5,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
@@ -397,13 +420,7 @@ const server=http.createServer((req,res)=>{
              first), so a newly-met snake collides and renders complete
              from frame one instead of growing a tail as you observe it */
           const src=[...room.players.values(),...room.bots].find(x=>x.id===sn.i);
-          if(src&&src.body&&src.body.length>1){
-            const step=Math.max(1,Math.ceil(src.body.length/50));
-            const b=[];
-            for(let bi=0;bi<src.body.length;bi+=step)
-              b.push([Math.round(src.body[bi].x),Math.round(src.body[bi].y)]);
-            sn.b=b;
-          }
+          const b=bodyPolyline(src);if(b)sn.b=b;
           return sn;
         }),...cachedBoards()});
     }
