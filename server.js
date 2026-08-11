@@ -446,6 +446,3 @@ const server=http.createServer((req,res)=>{
 process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
 module.exports={server,rooms,boards,step,TICK};
-process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
-server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
-module.exports={server,rooms,boards};
