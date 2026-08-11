@@ -102,7 +102,7 @@ function placeAt(s,p){s.x=p.x;s.y=p.y;s.path=[{x:p.x,y:p.y}];s.pathLen=0;s.body=
 function makeSnake(name,color,isBot){
   const p=diskPoint(WORLD_R*.6);
   return{name,color,bot:!!isBot,x:p.x,y:p.y,angle:rand(0,6.28),desired:rand(0,6.28),
-    length:START_LENGTH+(isBot?rand(0,120):0),peak:START_LENGTH,val:75,boost:false,alive:true,
+    length:START_LENGTH+(isBot?rand(0,120):0),peak:START_LENGTH,val:95,boost:false,alive:true, /* V2: 100 entry = 95 at risk + 5 protocol */
     path:[{x:p.x,y:p.y}],pathLen:0,body:[{x:p.x,y:p.y}],kills:0,respawnT:0,
     skill:isBot?(Math.random()<.3?rand(.8,1):Math.random()<.6?rand(.45,.75):rand(.2,.4)):1,
     wx:0,wy:0,wT:0};
@@ -185,7 +185,7 @@ function step(room,dt){
       const cell=grid.get(cx+','+cy);if(!cell)continue;
       for(const f of cell){
         if(!room.foods.has(f.i))continue;
-        const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+20;
+        const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+20+(s.bot?0:26);
         if(dx*dx+dy*dy<rr*rr){
           const sizeM=1/(1+Math.max(0,s.length-START_LENGTH)/2600);
           s.length+=f.v*sizeM;
@@ -235,10 +235,10 @@ function kill(room,s,killer,how){
     spawnFood(room,p.x+rand(-14,14),p.y+rand(-14,14),per,s.color);}
   if(killer){
     killer.kills++;
-    /* per-match economy: the killer captures 60% of the victim's carried
-       value, 5% of it burns, the rest vanishes with the corpse. Value only
-       ever moves BETWEEN players, food never mints it: no farming. */
-    const gain=Math.round(s.val*0.60),burned=Math.round(s.val*0.05);
+    /* per-match economy (V2 spec): the killer captures 95% of EVERYTHING
+       the victim was carrying, 5% burns forever. Value only ever moves
+       BETWEEN players, food never mints it: no farming, no inflation. */
+    const gain=Math.round(s.val*0.95),burned=s.val-Math.round(s.val*0.95);
     killer.val+=gain;boards.burn+=burned;dirty=true;
     pushEvent(room,killer,{t:'kill',name:s.name,mass:Math.round(s.length),g:gain});
   }
@@ -296,7 +296,7 @@ function snakesSnapshot(room){
   const out=[];
   for(const s of[...room.players.values(),...room.bots])if(s.alive)
     out.push({i:s.id,n:s.name,x:Math.round(s.x*10)/10,y:Math.round(s.y*10)/10,
-      a:Math.round(s.angle*100)/100,l:Math.round(s.length),c:s.color,k:s.kills});
+      a:Math.round(s.angle*100)/100,l:Math.round(s.length),c:s.color,k:s.kills,v:Math.round(s.val||0)});
   return out;
 }
 let _bCache=null,_bTs=0;
@@ -411,7 +411,7 @@ const server=http.createServer((req,res)=>{
       s.id='p'+(nextId++);s.events=[];s.lastSeen=Date.now();
       s.addQ=[];s.delQ=[];s.lastBoardsTs=0;
       /* simulated entry economics: 20 burn, 10 team, 70 pool (real ones move on-chain) */
-      boards.burn+=15;boards.pool+=75;dirty=true; /* pool = staked in play today */
+      boards.pool+=95;dirty=true; /* V2 entry: 100 = 95 at risk + 5 protocol fee, NO entry burn */
       placeAt(s,safeSpawn(room));
       room.players.set(s.id,s);
       return json(res,200,{proto:6,id:s.id,room:room.id,
