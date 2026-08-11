@@ -141,8 +141,8 @@ function step(room,dt){
      position arrives via /input), but their trail, boost drain and boost
      orb drops still happen here so everyone sees them identically */
   for(const s of all){
-    {
-      const d=norm(s.desired-s.angle),tr=(s.bot?turnRate(s):turnRateH(s))*dt;
+    if(s.bot){
+      const d=norm(s.desired-s.angle),tr=turnRate(s)*dt;
       s.angle+=clamp(d,-tr,tr);
       const sp=((s.boost&&s.length>64)?290:185)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
@@ -202,6 +202,13 @@ function step(room,dt){
   /* collisions: head vs others' bodies + wall */
   for(const s of all){
     if(!s.alive)continue;
+    if(!s.bot){
+      /* humans die on their own screen (client-authoritative via /died,
+         validated): killing them here with a 150-250ms stale copy produced
+         the deaths their eyes rightly called unfair */
+      if(Math.hypot(s.x,s.y)>WORLD_R+60)kill(room,s,null,'the wall');
+      continue;
+    }
     if(Math.hypot(s.x,s.y)>WORLD_R){kill(room,s,null,'the wall');continue;}
     const hr=headR(s);
     for(const o of all){
@@ -351,7 +358,7 @@ const server=http.createServer((req,res)=>{
     return json(res,200,{bodies:out});
   }
   if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
-  if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:6,rooms:rooms.length});
+  if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:7,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
   req.on('end',()=>{
     let d={};try{d=JSON.parse(body||'{}');}catch(e){return json(res,400,{error:'bad json'});}
@@ -414,7 +421,7 @@ const server=http.createServer((req,res)=>{
       boards.pool+=95;dirty=true; /* V2 entry: 100 = 95 at risk + 5 protocol fee, NO entry burn */
       placeAt(s,safeSpawn(room));
       room.players.set(s.id,s);
-      return json(res,200,{proto:6,id:s.id,room:room.id,
+      return json(res,200,{proto:7,id:s.id,room:room.id,
         foods:[...room.foods.values()],
         snakes:snakesSnapshot(room).map(sn=>{
           /* seed geometry: a compact polyline of the ACTUAL body (head
@@ -431,13 +438,19 @@ const server=http.createServer((req,res)=>{
       if(!p)return json(res,404,{error:'unknown player'});
       const nowT=Date.now();
       if(p.alive){
-        /* SLITHER ARCHITECTURE: clients send INTENT only (steering + boost).
-           The server integrates every snake on ONE consistent world and is
-           the sole authority for movement and deaths: pass-throughs and
-           wrong-victim deaths are impossible by construction. The client
-           predicts its own head with the SAME physics for instant control. */
-        if(isFinite(d.a))p.desired=d.a;
-        else if(isFinite(d.angle))p.desired=d.angle; /* legacy field */
+        /* HYBRID MODEL (the one that plays right on 200ms links): the
+           CLIENT owns its own movement (instant control) and its own death
+           (via /died, validated); the server validates positions with a
+           speed clamp, and stays authoritative for bots, eating, length
+           and the economy. Full server integration needs regional servers. */
+        if(isFinite(d.x)&&isFinite(d.y)){
+          const dtc=Math.min(1,(nowT-(p._lt||nowT))/1000)||0.08;
+          const maxd=340*dtc+80;
+          const dx=d.x-p.x,dy=d.y-p.y,dist=Math.hypot(dx,dy);
+          if(dist>maxd){p.x+=dx/dist*maxd;p.y+=dy/dist*maxd;}
+          else{p.x=d.x;p.y=d.y;}
+        }
+        if(isFinite(d.angle)){p.angle=d.angle;p.desired=d.angle;}
         p.boost=!!d.boost;
         if(p.length>p.peak)p.peak=p.length;
       }
