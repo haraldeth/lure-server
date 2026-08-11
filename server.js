@@ -112,6 +112,7 @@ let nextId=1;
 
 /* ---- physics tick ---- */
 function step(room,dt){
+  room.simT=(room.simT||0)+dt; /* sim-time odometer (tests/diagnostics) */
   const all=[...room.players.values(),...room.bots].filter(s=>s.alive);
   /* bot AI (simplified port of the client AI) */
   for(const b of room.bots){
@@ -263,8 +264,17 @@ function buildSnapshot(room,p,snap){
   if(nowT-p.lastBoardsTs>3000){p.lastBoardsTs=nowT;Object.assign(msg,cachedBoards());}
   return msg;
 }
-setInterval(()=>{rollDay();for(const r of rooms)step(r,TICK);
-  pushT+=TICK;
+let lastTickAt=Date.now();
+setInterval(()=>{rollDay();
+  const nowRT=Date.now();
+  let elapsed=(nowRT-lastTickAt)/1000;lastTickAt=nowRT;
+  if(elapsed>0.25)elapsed=0.25; /* extreme stall: brief slow-motion beats teleports */
+  while(elapsed>0.0001){
+    const st=Math.min(TICK,elapsed);
+    for(const r of rooms)step(r,st);
+    elapsed-=st;
+    pushT+=st;
+  }
   if(pushT>=0.1){pushT=0;
     for(const r of rooms){
       let snap=null;
