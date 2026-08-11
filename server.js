@@ -23,7 +23,8 @@ const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
 const norm=a=>{while(a>Math.PI)a-=6.2832;while(a<-Math.PI)a+=6.2832;return a;};
 function diskPoint(r){const t=Math.random()*6.2832,d=Math.sqrt(Math.random())*r;return{x:Math.cos(t)*d,y:Math.sin(t)*d};}
 const headR=s=>Math.min(8+s.length*0.013,36);
-const turnRate=s=>Math.max(2.2-s.length*0.00022,1.05);
+const turnRate=s=>Math.max(2.2-s.length*0.00022,1.05); /* bots */
+const turnRateH=s=>Math.max(3.1,Math.min(5.6,5.6-s.length*0.0035)); /* humans: EXACT match with the client's prediction physics */
 
 /* ---- global rankings (shared by ALL rooms & devices) ---- */
 const BOARDS_FILE=process.env.BOARDS_FILE||'./boards.json';
@@ -139,8 +140,8 @@ function step(room,dt){
      position arrives via /input), but their trail, boost drain and boost
      orb drops still happen here so everyone sees them identically */
   for(const s of all){
-    if(s.bot){
-      const d=norm(s.desired-s.angle),tr=turnRate(s)*dt;
+    {
+      const d=norm(s.desired-s.angle),tr=(s.bot?turnRate(s):turnRateH(s))*dt;
       s.angle+=clamp(d,-tr,tr);
       const sp=((s.boost&&s.length>64)?290:185)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
@@ -200,16 +201,6 @@ function step(room,dt){
   /* collisions: head vs others' bodies + wall */
   for(const s of all){
     if(!s.alive)continue;
-    if(!s.bot){
-      /* HUMANS die on their own screen (client-authoritative, see /died):
-         killing them here with a position 150-250ms stale produced deaths
-         their eyes rightly called unfair. The server only enforces the wall
-         with a margin, plus the inactivity timeout, as safety nets.
-         TOKEN PHASE: the attester must re-simulate matches from input logs
-         before signing any cashout, restoring full server authority. */
-      if(Math.hypot(s.x,s.y)>WORLD_R+60)kill(room,s,null,'the wall');
-      continue;
-    }
     if(Math.hypot(s.x,s.y)>WORLD_R){kill(room,s,null,'the wall');continue;}
     const hr=headR(s);
     for(const o of all){
@@ -260,7 +251,7 @@ function pushEvent(room,s,ev){if(!s.bot){const p=room.players.get(s.id);if(p)p.e
 
 let pushT=0;
 function buildSnapshot(room,p,snap){
-  const msg={you:{alive:p.alive,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val)},
+  const msg={you:{alive:p.alive,x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10,a:p.angle,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val)},
     snakes:snap,events:p.events.splice(0)};
   if(p.addQ.length>400||p.delQ.length>300){
     p.addQ=[];p.delQ=[];
@@ -350,7 +341,7 @@ const server=http.createServer((req,res)=>{
     return json(res,200,{bodies:out});
   }
   if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
-  if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:5,rooms:rooms.length});
+  if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:6,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
   req.on('end',()=>{
     let d={};try{d=JSON.parse(body||'{}');}catch(e){return json(res,400,{error:'bad json'});}
@@ -413,7 +404,7 @@ const server=http.createServer((req,res)=>{
       boards.burn+=15;boards.pool+=75;dirty=true; /* pool = staked in play today */
       placeAt(s,safeSpawn(room));
       room.players.set(s.id,s);
-      return json(res,200,{proto:5,id:s.id,room:room.id,
+      return json(res,200,{proto:6,id:s.id,room:room.id,
         foods:[...room.foods.values()],
         snakes:snakesSnapshot(room).map(sn=>{
           /* seed geometry: a compact polyline of the ACTUAL body (head
@@ -430,19 +421,13 @@ const server=http.createServer((req,res)=>{
       if(!p)return json(res,404,{error:'unknown player'});
       const nowT=Date.now();
       if(p.alive){
-        /* CLIENT-DRIVEN position: the player's screen is the truth for where
-           they are; the server validates it (speed clamp below blocks
-           teleports) and stays authoritative for eating, kills and length.
-           NOTE for the on-chain phase: full server-side movement validation
-           is part of the anti-cheat work already flagged in the tokenomics. */
-        if(isFinite(d.x)&&isFinite(d.y)){
-          const dtc=Math.min(1,(nowT-(p._lt||nowT))/1000)||0.08;
-          const maxd=340*dtc+80;
-          const dx=d.x-p.x,dy=d.y-p.y,dist=Math.hypot(dx,dy);
-          if(dist>maxd){p.x+=dx/dist*maxd;p.y+=dy/dist*maxd;}
-          else{p.x=d.x;p.y=d.y;}
-        }
-        if(isFinite(d.angle)){p.angle=d.angle;p.desired=d.angle;}
+        /* SLITHER ARCHITECTURE: clients send INTENT only (steering + boost).
+           The server integrates every snake on ONE consistent world and is
+           the sole authority for movement and deaths: pass-throughs and
+           wrong-victim deaths are impossible by construction. The client
+           predicts its own head with the SAME physics for instant control. */
+        if(isFinite(d.a))p.desired=d.a;
+        else if(isFinite(d.angle))p.desired=d.angle; /* legacy field */
         p.boost=!!d.boost;
         if(p.length>p.peak)p.peak=p.length;
       }
@@ -460,6 +445,9 @@ const server=http.createServer((req,res)=>{
     json(res,404,{error:'not found'});
   });
 });
+process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
+server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
+module.exports={server,rooms,boards,step,TICK};
 process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
 module.exports={server,rooms,boards,step,TICK};
