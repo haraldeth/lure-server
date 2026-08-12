@@ -406,6 +406,43 @@ const server=http.createServer((req,res)=>{
       }
       return json(res,200,{ok:1});
     }
+    if(req.method==='GET'&&req.url==='/xauth/config'){
+      /* the client asks which X app to talk to; empty = OAuth not set up
+         yet and the client falls back to the manual handle modal */
+      return json(res,200,{clientId:process.env.X_CLIENT_ID||''});
+    }
+    if(req.method==='POST'&&req.url==='/xauth'){
+      /* real Sign-in-with-X, PKCE public client: the browser cannot call
+         X's token endpoint (no CORS), so this server does the exchange.
+         No client secret anywhere: PKCE code_verifier proves the flow. */
+      const cid=process.env.X_CLIENT_ID||'';
+      if(!cid)return json(res,400,{error:'oauth not configured'});
+      const code=String(d.code||'').slice(0,512);
+      const ver=String(d.verifier||'').slice(0,128);
+      const redir=String(d.redirect||'').slice(0,200);
+      if(!code||!ver||!/^https:\/\//.test(redir))return json(res,400,{error:'bad request'});
+      (async()=>{
+        try{
+          const ac=new AbortController();const tt=setTimeout(()=>ac.abort(),10000);
+          const tr=await fetch('https://api.x.com/2/oauth2/token',{
+            method:'POST',signal:ac.signal,
+            headers:{'Content-Type':'application/x-www-form-urlencoded'},
+            body:new URLSearchParams({grant_type:'authorization_code',
+              client_id:cid,code,redirect_uri:redir,code_verifier:ver}).toString()
+          });
+          const tok=await tr.json();
+          if(!tok.access_token){clearTimeout(tt);return json(res,401,{error:'token exchange failed'});}
+          const ur=await fetch('https://api.x.com/2/users/me',{
+            signal:ac.signal,headers:{Authorization:'Bearer '+tok.access_token}});
+          clearTimeout(tt);
+          const u=await ur.json();
+          const handle=String((u.data&&u.data.username)||'').replace(/[^A-Za-z0-9_]/g,'').slice(0,15);
+          if(!handle)return json(res,401,{error:'no user'});
+          return json(res,200,{handle});
+        }catch(e){return json(res,502,{error:'x unreachable'});}
+      })();
+      return;
+    }
     if(req.method==='POST'&&req.url==='/join'){
       /* abuse guards: hard caps so join-spam cannot exhaust server memory */
       let totalPlayers=0;for(const r of rooms)totalPlayers+=r.players.size;
