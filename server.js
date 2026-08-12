@@ -424,9 +424,12 @@ const server=http.createServer((req,res)=>{
       (async()=>{
         try{
           const ac=new AbortController();const tt=setTimeout(()=>ac.abort(),10000);
+          const secret=process.env.X_CLIENT_SECRET||'';
+          const headers={'Content-Type':'application/x-www-form-urlencoded'};
+          if(secret) /* confidential client: X requires HTTP Basic auth too */
+            headers.Authorization='Basic '+Buffer.from(cid+':'+secret).toString('base64');
           const tr=await fetch('https://api.x.com/2/oauth2/token',{
-            method:'POST',signal:ac.signal,
-            headers:{'Content-Type':'application/x-www-form-urlencoded'},
+            method:'POST',signal:ac.signal,headers,
             body:new URLSearchParams({grant_type:'authorization_code',
               client_id:cid,code,redirect_uri:redir,code_verifier:ver}).toString()
           });
@@ -447,7 +450,11 @@ const server=http.createServer((req,res)=>{
       /* abuse guards: hard caps so join-spam cannot exhaust server memory */
       let totalPlayers=0;for(const r of rooms)totalPlayers+=r.players.size;
       if(totalPlayers>=2000||rooms.length>=60)return json(res,503,{error:'server full'});
-      const name=String(d.name||'ANON').replace(/[<>&"]/g,'').toUpperCase().slice(0,14)||'ANON';
+      const raw=String(d.name||'ANON').replace(/[<>&"]/g,'').slice(0,14);
+      /* X handles keep their case (@darlinxsol stays pretty); everything
+         else is uppercased for the arena aesthetic. One canonical form
+         per player = no case-twin duplicates on the boards. */
+      const name=(raw.startsWith('@')?raw:raw.toUpperCase())||'ANON';
       const room=pickRoom();
       const s=makeSnake(name,'#45e8d4',false);
       s.id='p'+(nextId++);s.events=[];s.lastSeen=Date.now();
