@@ -18,6 +18,13 @@ const ROOM_CAPACITY=40, BOT_FILL=12, TICK=1/20;
 const DROP_FRACTION=0.35;
 const BOT_NAMES=['ANGLER','KRAKEN','NAUTILUS','MANTA','VIPER','GLOWWORM','LEVIATHAN','DRIFTER','SIREN','ABYSSAL','LANTERN','EEL'];
 const COLORS=['#45e8d4','#ff7ac8','#ffd166','#9d8cff','#7ce38b','#ff9d66'];
+/* bots wear muted deep-water tones: readable at a glance as FOOD, not prize */
+const BOT_COLORS=['#2e4a52','#33565e','#3a4e5a','#28414b','#456066','#31434f'];
+/* stake is CONFIG, not code: change ENTRY_LURE in the environment and the
+   whole economy follows (the USD peg lands here in the on-chain phase:
+   the deposit contract reads the live token price and computes ENTRY) */
+const ENTRY=Math.max(1,parseInt(process.env.ENTRY_LURE||'100',10));
+const AT_RISK=Math.round(ENTRY*0.95); /* 95% rides with you, 5% protocol */
 const rand=(a,b)=>a+Math.random()*(b-a);
 const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
 const norm=a=>{while(a>Math.PI)a-=6.2832;while(a<-Math.PI)a+=6.2832;return a;};
@@ -102,12 +109,12 @@ function placeAt(s,p){s.x=p.x;s.y=p.y;s.path=[{x:p.x,y:p.y}];s.pathLen=0;s.body=
 function makeSnake(name,color,isBot){
   const p=diskPoint(WORLD_R*.6);
   return{name,color,bot:!!isBot,x:p.x,y:p.y,angle:rand(0,6.28),desired:rand(0,6.28),
-    length:START_LENGTH+(isBot?rand(0,120):0),peak:START_LENGTH,val:95,boost:false,alive:true, /* V2: 100 entry = 95 at risk + 5 protocol */
+    length:START_LENGTH+(isBot?rand(0,120):0),peak:START_LENGTH,val:isBot?0:AT_RISK,boost:false,alive:true, /* bots NEVER carry $LURE: unfarmable */
     path:[{x:p.x,y:p.y}],pathLen:0,body:[{x:p.x,y:p.y}],kills:0,respawnT:0,
     skill:isBot?(Math.random()<.3?rand(.8,1):Math.random()<.6?rand(.45,.75):rand(.2,.4)):1,
     wx:0,wy:0,wT:0};
 }
-function spawnBot(room,i){const b=makeSnake(BOT_NAMES[i%12],COLORS[i%6],true);b.id='b'+i;room.bots.push(b);}
+function spawnBot(room,i){const b=makeSnake(BOT_NAMES[i%12],BOT_COLORS[i%6],true);b.id='b'+i;room.bots.push(b);}
 let nextId=1;
 
 /* ---- physics tick ---- */
@@ -232,6 +239,7 @@ function step(room,dt){
 function kill(room,s,killer,how){
   if(!s.alive)return;
   s.alive=false;
+  if(!killer&&s.val>0){boards.burn+=s.val;s.val=0;dirty=true;} /* wall/timeout: full burn */
   const mass=Math.max(0,s.length-START_LENGTH);
   const nOrbs=Math.min(26,6+Math.floor(mass/90));
   const per=Math.max(4,(mass*DROP_FRACTION)/nOrbs);
@@ -240,11 +248,22 @@ function kill(room,s,killer,how){
     spawnFood(room,p.x+rand(-14,14),p.y+rand(-14,14),per,s.color);}
   if(killer){
     killer.kills++;
-    /* per-match economy (V2 spec): the killer captures 95% of EVERYTHING
-       the victim was carrying, 5% burns forever. Value only ever moves
-       BETWEEN players, food never mints it: no farming, no inflation. */
-    const gain=Math.round(s.val*0.95),burned=s.val-Math.round(s.val*0.95);
-    killer.val+=gain;boards.burn+=burned;dirty=true;
+    /* ECONOMY RULES (V2 + bot-safety):
+       - a HUMAN killer captures 95% of everything the victim carried,
+         5% burns forever. Value only moves between HUMANS.
+       - a BOT killer (or the wall) transfers NOTHING: the victim's whole
+         carried value burns. The abyss consumed it. Bots can never hold,
+         launder or leak $LURE: unfarmable by construction. */
+    let gain=0;
+    if(s.val>0){
+      if(!killer.bot){
+        gain=Math.round(s.val*0.95);
+        killer.val+=gain;boards.burn+=(s.val-gain);
+      }else{
+        boards.burn+=s.val; /* bot kill: full burn */
+      }
+      s.val=0;dirty=true;
+    }
     pushEvent(room,killer,{t:'kill',name:s.name,mass:Math.round(s.length),g:gain});
   }
   /* only HUMANS enter the global rankings: bots fill the map, never the podium */
@@ -257,7 +276,7 @@ function pushEvent(room,s,ev){if(!s.bot){const p=room.players.get(s.id);if(p)p.e
 
 let pushT=0;
 function buildSnapshot(room,p,snap){
-  const msg={t:Math.round(room.simT*1000),you:{alive:p.alive,x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10,a:p.angle,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val)},
+  const msg={t:Math.round(room.simT*1000),you:{alive:p.alive,e:ENTRY,x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10,a:p.angle,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val)},
     snakes:snap,events:p.events.splice(0)};
   if(p.addQ.length>400||p.delQ.length>300){
     p.addQ=[];p.delQ=[];
@@ -514,4 +533,4 @@ process.on('SIGTERM',()=>{try{saveBoards();}catch(e){}process.exit(0);});
 /* paste-proof guard: if a bad GitHub paste ever duplicates the tail of
    this file, the second listen call is ignored instead of crashing */
 if(!server.listening)server.listen(PORT,()=>console.log('LURE game server on :'+PORT));
-module.exports={server,rooms,boards,step,TICK};
+module.exports={server,rooms,boards,step,TICK,kill};
