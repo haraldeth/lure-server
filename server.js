@@ -155,11 +155,24 @@ function step(room,dt){
       const sp=((s.boost&&s.length>64)?290:185)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
     }else{
-      /* ANTI-PAUSE (spec Â§25): if the client goes quiet (hidden tab, lost
-         focus, connection drop) the SERVER takes the wheel: the creature
-         keeps swimming straight, alive and fully vulnerable. Nobody can
-         freeze mid-arena as an untouchable statue. */
-      s._afk=(nowMs-(s._lt||0))>700;
+      /* ANTI-PAUSE by REAL DISPLACEMENT (spec Â§25). A hidden tab keeps
+         dribbling ~1 stale input/sec with a FROZEN position, so silence
+         detection fails. Instead we track how far the accepted position
+         actually moved over the last second: in this game you can never
+         stand still, so no travel == frozen client, whatever arrives.
+         Frozen => the SERVER drives straight, alive and fully vulnerable,
+         and stale client positions are ignored (see /input) until real
+         motion resumes. Nobody freezes mid-arena as a statue. */
+      /* AFK = the CLIENT stopped feeding real motion. We accumulate path
+         length contributed by /input only (s._cliMove, added there); the
+         server's own catch-up driving does NOT count, so it can't clear the
+         AFK flag by itself. A tight circle still nets ~185u/s of client
+         path, so honest play is never flagged; a frozen tab nets 0. */
+      if(s._t0===undefined)s._t0=nowMs;
+      if(nowMs-s._t0>=1000){
+        s._afk=(s._cliMove||0)<60;
+        s._cliMove=0;s._t0=nowMs;
+      }
       if(s._afk&&s.alive){
         const sp=185*dt;
         s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
@@ -371,6 +384,16 @@ const server=http.createServer((req,res)=>{
     req.on('close',()=>{if(sp.sse===res)sp.sse=null;});
     return;
   }
+  if(req.method==='GET'&&req.url.startsWith('/whereami')){
+    /* on tab-return the client asks where it REALLY is now, snapping to the
+       truth (or learning it died) instead of springing back from its frozen
+       local copy: this is what kills the shrink/stretch rubber-band. */
+    const q=new URL(req.url,'http://x').searchParams.get('id')||'';
+    let pl=null;for(const r of rooms)if(r.players.has(q))pl=r.players.get(q);
+    if(!pl)return json(res,404,{error:'unknown player'});
+    return json(res,200,{alive:pl.alive,x:Math.round(pl.x*10)/10,y:Math.round(pl.y*10)/10,
+      a:Math.round(pl.angle*100)/100,length:Math.round(pl.length)});
+  }
   if(req.method==='GET'&&req.url.startsWith('/bodies')){
     /* geometry resync after a free-tier stall: the client re-seeds every
        remote body from the REAL server geometry instead of colliding
@@ -517,6 +540,17 @@ const server=http.createServer((req,res)=>{
            speed clamp, and stays authoritative for bots, eating, length
            and the economy. Full server integration needs regional servers. */
         if(isFinite(d.x)&&isFinite(d.y)){
+          /* client-contributed path length feeds the AFK detector. Only
+             counts vs the client's OWN last reported point (not the
+             server-driven position), so catch-up driving never looks like
+             client motion, and a frozen tab resending one point adds 0. */
+          if(p._lastCliX!==undefined){
+            const cmv=Math.hypot(d.x-p._lastCliX,d.y-p._lastCliY);
+            if(cmv>0.5&&cmv<600)p._cliMove=(p._cliMove||0)+cmv;
+          }
+          p._lastCliX=d.x;p._lastCliY=d.y;
+        }
+        if(isFinite(d.x)&&isFinite(d.y)&&!p._afk){ /* ignore stale positions while absent: the server drives then */
           /* SPEED BUDGET (anti input-spam): allowance accrues with REAL
              time and is CONSUMED by every accepted move, so flooding inputs
              cannot buy extra distance. Refill capped at max speed + a small
