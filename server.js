@@ -120,6 +120,7 @@ let nextId=1;
 /* ---- physics tick ---- */
 function step(room,dt){
   room.simT=(room.simT||0)+dt; /* sim-time odometer (tests/diagnostics) */
+  const nowMs=Date.now();
   const all=[...room.players.values(),...room.bots].filter(s=>s.alive);
   /* bot AI (simplified port of the client AI) */
   for(const b of room.bots){
@@ -153,6 +154,16 @@ function step(room,dt){
       s.angle+=clamp(d,-tr,tr);
       const sp=((s.boost&&s.length>64)?290:185)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
+    }else{
+      /* ANTI-PAUSE (spec Â§25): if the client goes quiet (hidden tab, lost
+         focus, connection drop) the SERVER takes the wheel: the creature
+         keeps swimming straight, alive and fully vulnerable. Nobody can
+         freeze mid-arena as an untouchable statue. */
+      s._afk=(nowMs-(s._lt||0))>700;
+      if(s._afk&&s.alive){
+        const sp=185*dt;
+        s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
+      }
     }
     const boosting=s.boost&&s.length>64; /* gate == drain floor: one orb after spawning unlocks sprint, slither-style */
     if(boosting){s.length=Math.max(64,s.length-14*dt);
@@ -209,10 +220,11 @@ function step(room,dt){
   /* collisions: head vs others' bodies + wall */
   for(const s of all){
     if(!s.alive)continue;
-    if(!s.bot){
-      /* humans die on their own screen (client-authoritative via /died,
-         validated): killing them here with a 150-250ms stale copy produced
-         the deaths their eyes rightly called unfair */
+    if(!s.bot&&!s._afk){
+      /* ACTIVE humans die on their own screen (client-authoritative via
+         /died, validated): killing them here with a stale copy produced
+         unfair deaths. AFK humans fall through: the server-side absolute
+         rule below applies to them exactly like bots: no pause exploit. */
       if(Math.hypot(s.x,s.y)>WORLD_R+60)kill(room,s,null,'the wall');
       continue;
     }
@@ -505,11 +517,20 @@ const server=http.createServer((req,res)=>{
            speed clamp, and stays authoritative for bots, eating, length
            and the economy. Full server integration needs regional servers. */
         if(isFinite(d.x)&&isFinite(d.y)){
-          const dtc=Math.min(1,(nowT-(p._lt||nowT))/1000)||0.08;
-          const maxd=340*dtc+80;
+          /* SPEED BUDGET (anti input-spam): allowance accrues with REAL
+             time and is CONSUMED by every accepted move, so flooding inputs
+             cannot buy extra distance. Refill capped at max speed + a small
+             jitter cushion; the pool itself caps at one big correction. */
+          const dtc=Math.min(1,(nowT-(p._lt||nowT))/1000);
+          /* speed budget accrues ONLY with real time (=== 0 on a same-ms
+             burst, so flooding buys nothing); '??' not '||' so a drained
+             pool of 0 is not silently refilled back to a default. */
+          if(p._budget===undefined)p._budget=140;
+          p._budget=Math.min(420,p._budget+340*dtc);
           const dx=d.x-p.x,dy=d.y-p.y,dist=Math.hypot(dx,dy);
-          if(dist>maxd){p.x+=dx/dist*maxd;p.y+=dy/dist*maxd;}
-          else{p.x=d.x;p.y=d.y;}
+          const step=Math.min(dist,p._budget);
+          if(dist>0){p.x+=dx/dist*step;p.y+=dy/dist*step;}
+          p._budget-=step;
         }
         if(isFinite(d.angle)){p.angle=d.angle;p.desired=d.angle;}
         p.boost=!!d.boost;
