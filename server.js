@@ -334,10 +334,16 @@ setInterval(()=>{rollDay();
       }
     }
   }
-  /* clean disconnected players (no input for 10s) */
+  /* clean genuinely disconnected players. NOT the same threshold as the
+     AFK conveyor (that fires after 1s of no client motion and keeps the
+     creature alive+simulated): this is the final "gone for good" cutoff.
+     A hidden tab keeps posting /input, just throttled hard by the browser
+     (sometimes to ~once/several-sec), so this must be generous enough to
+     survive a normal tab-switch, or the player gets wiped mid-AFK-drive
+     and /whereami on return 404s into a stale rubber-band snap-back. */
   const now=Date.now();
   for(const r of rooms)for(const[id,p]of r.players){
-    if(now-p.lastSeen>10000){if(p.alive)recordScore(p.name,p.peak);r.players.delete(id);}}
+    if(now-p.lastSeen>60000){if(p.alive)recordScore(p.name,p.peak);r.players.delete(id);}}
 },TICK*1000);
 
 /* ---- snapshots ---- */
