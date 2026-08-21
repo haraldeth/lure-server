@@ -19,6 +19,11 @@ const DROP_FRACTION=0.35;
 const BOT_NAMES=['ANGLER','KRAKEN','NAUTILUS','MANTA','VIPER','GLOWWORM','LEVIATHAN','DRIFTER','SIREN','ABYSSAL','LANTERN','EEL'];
 const COLORS=['#45e8d4','#ff7ac8','#ffd166','#9d8cff','#7ce38b','#ff9d66'];
 /* bots wear muted deep-water tones: readable at a glance as FOOD, not prize */
+function colorFor(name){
+  let h=0; const n=String(name||'');
+  for(let i=0;i<n.length;i++)h=(h*31+n.charCodeAt(i))>>>0;
+  return COLORS[h%COLORS.length];
+}
 const BOT_COLORS=['#2e4a52','#33565e','#3a4e5a','#28414b','#456066','#31434f'];
 /* stake is CONFIG, not code: change ENTRY_LURE in the environment and the
    whole economy follows (the USD peg lands here in the on-chain phase:
@@ -516,7 +521,11 @@ const server=http.createServer((req,res)=>{
          per player = no case-twin duplicates on the boards. */
       const name=(raw.startsWith('@')?raw:raw.toUpperCase())||'ANON';
       const room=pickRoom();
-      const s=makeSnake(name,'#45e8d4',false);
+      /* Every human used to spawn '#45e8d4': in a busy room everyone was the
+         same teal and you could not tell who was who. Pick from the palette
+         by hashing the handle, so a player keeps THEIR colour across runs
+         and the board colour matches the snake on screen. */
+      const s=makeSnake(name,colorFor(name),false);
       s.id='p'+(nextId++);s.events=[];s.lastSeen=Date.now();
       s.addQ=[];s.delQ=[];s.lastBoardsTs=0;
       /* simulated entry economics: 20 burn, 10 team, 70 pool (real ones move on-chain) */
