@@ -1,16 +1,132 @@
-/* LURE multiplayer game server â€” zero dependencies, deploy anywhere Node runs.
+/* LURE multiplayer game server — two deps now (@solana/web3.js, tweetnacl),
+   only for THE ABYSS's chain wiring; everything else is still plain Node.
    Authoritative world: rooms of up to 40 real players (bots fill the gaps so
    the map is always alive), server-side physics, kills, corpse drops, GLOBAL
    daily + all-time rankings persisted to disk and shared by every device.
    Protocol: simple HTTP polling (works everywhere, no websockets needed):
-     POST /join   {name}                 -> {id,room,you,snakes,foods,day,all}
-     POST /input  {id,angle,boost}       -> snapshot {you,snakes,foodAdd,foodDel,events,day,all,pool,burn}
-     POST /leave  {id}                   -> {score}
-     GET  /rankings                      -> {day,all,pool,burn}   (for the menu)
+     POST /join       {name, matchId?, player?} -> {id,room,you,snakes,foods,day,all}
+     POST /input      {id,angle,boost}          -> snapshot {you,snakes,foodAdd,foodDel,events,day,all,pool,burn}
+     POST /leave      {id}                      -> {score,val}
+     GET  /rankings                             -> {day,all,pool,burn}   (for the menu)
+     POST /match/new  {player, tier}            -> {matchId}   (THE ABYSS: unpredictable id, bound to a wallet+tier)
+     POST /attest/claim {matchId}               -> {message,signature,attesterPublicKey}  (THE ABYSS: escape payout)
 */
 const http = require('http');
 const fs = require('fs');
+const crypto = require('crypto');
 const PORT = process.env.PORT || 8790;
+/* PHASE mirrors index.html's own `const PHASE=` literal. Flip BOTH together
+   when going live: this one via the Render env var, the client's by editing
+   the source. Until then ABYSS_ON stays false and /match/new + /attest/claim
+   simply refuse to run (see below), so nothing here can touch real money by
+   accident. */
+const PHASE = process.env.PHASE || 'free';
+const ABYSS_ON = PHASE === 'abyss';
+
+/* ---- THE ABYSS: chain wiring (only active once ABYSS_ON) --------------- */
+let web3 = null, nacl = null;
+try { web3 = require('@solana/web3.js'); } catch (e) { /* reported at boot, below */ }
+try { nacl = require('tweetnacl'); } catch (e) { /* reported at boot, below */ }
+
+/* Program id and IDL seeds are copied from ABYSS_IDL in index.html — keep
+   them in sync if the program is ever redeployed with a new address. */
+const ABYSS_PROGRAM_ID = process.env.ABYSS_PROGRAM_ID || 'A8tG9q3L28MXudiPeswU2uR1QB33RFrJqruz8AtNtCr6';
+const ABYSS_RPC_URL = process.env.ABYSS_RPC_URL || 'https://api.devnet.solana.com';
+/* ASSUMPTION — verify against attest.rs: 0 = devnet, 1 = mainnet-beta. If the
+   program checks this byte differently, set ABYSS_NETWORK_TAG in the env to
+   match, or tell me the real encoding and I'll fix it here. */
+const ABYSS_NETWORK_TAG = parseInt(process.env.ABYSS_NETWORK_TAG || '0', 10);
+const ABYSS_MATCH_TTL_MS = parseInt(process.env.ABYSS_MATCH_TTL_MS || String(15 * 60 * 1000), 10); /* time to deposit after /match/new */
+const ABYSS_CLAIM_TTL_MS = parseInt(process.env.ABYSS_CLAIM_TTL_MS || String(10 * 60 * 1000), 10); /* time to claim after escaping alive */
+const ABYSS_ATTEST_EXPIRY_S = parseInt(process.env.ABYSS_ATTEST_EXPIRY_S || '180', 10); /* how long the signed message is valid on-chain */
+
+const abyssProgramId = web3 ? new web3.PublicKey(ABYSS_PROGRAM_ID) : null;
+const abyssConnection = web3 ? new web3.Connection(ABYSS_RPC_URL, 'confirmed') : null;
+function abyssPda(seedLabel, extra) {
+  const seeds = [Buffer.from(seedLabel)];
+  if (extra) seeds.push(Buffer.from(extra));
+  return web3.PublicKey.findProgramAddressSync(seeds, abyssProgramId)[0];
+}
+const abyssMatchPda = matchId => abyssPda('match', matchId);
+
+/* Raw Borsh/Anchor layout of MatchAccount, mirrored from ABYSS_IDL.types in
+   index.html. No anchor client on the server: this is the whole account,
+   read by hand, so there is exactly one place (that IDL block) to keep in
+   sync if the program's struct ever changes. */
+const MATCH_DISCRIMINATOR = Buffer.from([235, 36, 243, 39, 81, 16, 144, 87]);
+const MATCH_STATE = { IDLE: 0, AT_RISK: 1, RESOLVED: 2 };
+function decodeMatchAccount(data) {
+  if (data.length < 107 || !data.slice(0, 8).equals(MATCH_DISCRIMINATOR)) return null;
+  return {
+    matchId: data.slice(8, 40),
+    player: new web3.PublicKey(data.slice(40, 72)),
+    atRisk: data.readBigUInt64LE(72),
+    seq: data.readBigUInt64LE(80),
+    state: data.readUInt8(88),
+    outcome: data.readUInt8(89),
+  };
+}
+async function fetchMatchAccount(matchIdBytes) {
+  if (!web3 || !abyssConnection) throw new Error('solana web3 unavailable on server');
+  const info = await abyssConnection.getAccountInfo(abyssMatchPda(Buffer.from(matchIdBytes)));
+  if (!info) return null;
+  return decodeMatchAccount(info.data);
+}
+
+/* Mirrors ATTEST_DOMAIN / parseAttestationMessage in index.html's wallet.js.
+   Any change here MUST be mirrored there and in the on-chain attest.rs. */
+const ATTEST_DOMAIN = Buffer.from('LURE_ABYSS_V1', 'ascii'); /* 13 bytes */
+const OUTCOME_ESCAPE_ALIVE = 1;
+function buildAttestationMessage(f) {
+  const buf = Buffer.alloc(175);
+  let o = 0;
+  ATTEST_DOMAIN.copy(buf, o); o += 13;
+  buf.writeUInt8(f.networkTag, o); o += 1;
+  Buffer.from(f.programId.toBytes()).copy(buf, o); o += 32;
+  buf.writeUInt8(f.outcome, o); o += 1;
+  Buffer.from(f.matchId).copy(buf, o); o += 32;
+  buf.writeBigUInt64LE(BigInt(f.matchSeq), o); o += 8;
+  buf.writeBigUInt64LE(BigInt(f.atRisk), o); o += 8;
+  Buffer.from(f.player.toBytes()).copy(buf, o); o += 32;
+  Buffer.from(f.counterpartyMatchId).copy(buf, o); o += 32;
+  buf.writeBigUInt64LE(BigInt(f.counterpartySeq), o); o += 8;
+  buf.writeBigInt64LE(BigInt(f.expiryUnix), o); o += 8;
+  return buf;
+}
+
+/* Solana keypairs are conventionally 64 bytes: 32-byte seed + 32-byte public
+   key (the exact format `solana-keygen new` writes to a .json file, and the
+   exact format tweetnacl's sign.detached expects). Paste that file's array
+   AS-IS into ATTESTER_SECRET_KEY and this reads it with no conversion step.
+   NEVER put this key in index.html or anywhere the browser can reach it. */
+function loadAttesterKeypair() {
+  const raw = (process.env.ATTESTER_SECRET_KEY || '').trim();
+  if (!raw) return null;
+  let bytes;
+  try {
+    bytes = Uint8Array.from(raw[0] === '[' ? JSON.parse(raw) : Buffer.from(raw, 'base64'));
+  } catch (e) { console.error('[abyss] ATTESTER_SECRET_KEY unreadable:', e.message); return null; }
+  if (bytes.length !== 64) { console.error('[abyss] ATTESTER_SECRET_KEY must be 64 bytes, got ' + bytes.length); return null; }
+  return { secretKey: bytes, publicKey: bytes.slice(32, 64) };
+}
+const attesterKeypair = (web3 && nacl) ? loadAttesterKeypair() : null;
+
+if (ABYSS_ON) {
+  if (!web3) console.error('[abyss] PHASE=abyss pero @solana/web3.js no esta instalado: npm install en gameserver/.');
+  if (!nacl) console.error('[abyss] PHASE=abyss pero tweetnacl no esta instalado: npm install en gameserver/.');
+  if (!attesterKeypair) console.error('[abyss] PHASE=abyss pero ATTESTER_SECRET_KEY falta o es invalida: /attest/claim fallara.');
+  else console.log('[abyss] attester pubkey: ' + new web3.PublicKey(attesterKeypair.publicKey).toBase58() + ' — confirma que coincide con config.attester on-chain.');
+}
+
+/* matchId (hex) -> pending deposit not yet confirmed on-chain */
+const pendingMatches = new Map();
+/* matchId (hex) -> confirmed escape-alive, ready for ONE /attest/claim */
+const escapedMatches = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of pendingMatches) if (now - v.createdAt > ABYSS_MATCH_TTL_MS) pendingMatches.delete(k);
+  for (const [k, v] of escapedMatches) if (now - v.createdAt > ABYSS_CLAIM_TTL_MS) escapedMatches.delete(k);
+}, 60000);
 
 /* ---- constants (mirror the client) ---- */
 const WORLD_R=2500, START_LENGTH=60, FOOD_TARGET=260, MAX_FOOD=300;
@@ -160,7 +276,7 @@ function step(room,dt){
       const sp=((s.boost&&s.length>64)?290:185)*dt;
       s.x+=Math.cos(s.angle)*sp;s.y+=Math.sin(s.angle)*sp;
     }else{
-      /* ANTI-PAUSE by REAL DISPLACEMENT (spec Â§25). A hidden tab keeps
+      /* ANTI-PAUSE by REAL DISPLACEMENT (spec §25). A hidden tab keeps
          dribbling ~1 stale input/sec with a FROZEN position, so silence
          detection fails. Instead we track how far the accepted position
          actually moved over the last second: in this game you can never
@@ -423,8 +539,61 @@ const server=http.createServer((req,res)=>{
   if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
   if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:7,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
-  req.on('end',()=>{
+  req.on('end',async()=>{
     let d={};try{d=JSON.parse(body||'{}');}catch(e){return json(res,400,{error:'bad json'});}
+    if(req.method==='POST'&&req.url==='/match/new'){
+      /* THE ABYSS, step 1 of 3: the client asks for an unpredictable matchId
+         BEFORE depositing, bound here to a wallet+tier. This is what lets
+         /attest/claim later trust "this matchId belongs to this wallet" —
+         the browser never gets to invent its own id. */
+      if(!ABYSS_ON)return json(res,403,{error:'THE ABYSS is not open yet'});
+      if(!web3)return json(res,503,{error:'server misconfigured: solana web3 unavailable'});
+      let playerPk;
+      try{playerPk=new web3.PublicKey(String(d.player||''));}catch(e){return json(res,400,{error:'invalid player pubkey'});}
+      const tier=parseInt(d.tier,10);
+      if(!(tier>=0&&tier<4))return json(res,400,{error:'invalid tier'});
+      let matchId,hex;
+      do{matchId=crypto.randomBytes(32);hex=matchId.toString('hex');}while(pendingMatches.has(hex));
+      pendingMatches.set(hex,{matchId,player:playerPk.toBase58(),tier,createdAt:Date.now()});
+      return json(res,200,{matchId:hex});
+    }
+    if(req.method==='POST'&&req.url==='/attest/claim'){
+      /* THE ABYSS, step 3 of 3: the player escaped alive (recorded by /leave,
+         below) and now wants to cash out on-chain. The browser gets a signed
+         message it can transport but never influence — the amount and match
+         identity come entirely from what THIS server tracked during the run. */
+      if(!ABYSS_ON)return json(res,403,{error:'THE ABYSS is not open yet'});
+      if(!web3||!nacl||!attesterKeypair)return json(res,503,{error:'attester not configured on this server'});
+      const hex=String(d.matchId||'').toLowerCase();
+      if(!/^[0-9a-f]{64}$/.test(hex))return json(res,400,{error:'invalid matchId'});
+      const esc=escapedMatches.get(hex);
+      if(!esc)return json(res,404,{error:'no recorded escape for this match'});
+      if(esc.used)return json(res,409,{error:'already claimed'});
+      esc.used=true; /* single-use here; resolve_escape also can't run twice on-chain (match state -> Resolved) */
+      try{
+        const message=buildAttestationMessage({
+          networkTag:ABYSS_NETWORK_TAG,
+          programId:abyssProgramId,
+          outcome:OUTCOME_ESCAPE_ALIVE,
+          matchId:Buffer.from(hex,'hex'),
+          matchSeq:esc.seq,
+          atRisk:esc.atRisk,
+          player:new web3.PublicKey(esc.player),
+          counterpartyMatchId:Buffer.alloc(32),
+          counterpartySeq:0n,
+          expiryUnix:Math.floor(Date.now()/1000)+ABYSS_ATTEST_EXPIRY_S,
+        });
+        const signature=nacl.sign.detached(message,attesterKeypair.secretKey);
+        return json(res,200,{
+          message:Buffer.from(message).toString('hex'),
+          signature:Buffer.from(signature).toString('hex'),
+          attesterPublicKey:new web3.PublicKey(attesterKeypair.publicKey).toBase58(),
+        });
+      }catch(e){
+        esc.used=false; /* signing failed: let them retry instead of burning their one shot */
+        return json(res,500,{error:'could not sign attestation: '+e.message});
+      }
+    }
     if(req.method==='POST'&&req.url==='/boards/seed'){
       /* self-healing rankings for the FREE-TIER phase: a client that holds a
          fuller cached board re-seeds a freshly-woken (wiped) server, so all
@@ -520,6 +689,25 @@ const server=http.createServer((req,res)=>{
          else is uppercased for the arena aesthetic. One canonical form
          per player = no case-twin duplicates on the boards. */
       const name=(raw.startsWith('@')?raw:raw.toUpperCase())||'ANON';
+      /* THE ABYSS, step 2 of 3: real money only enters the arena after the
+         deposit is CONFIRMED on-chain — never on the client's word alone. */
+      let abyssBinding=null;
+      if(ABYSS_ON){
+        if(!web3)return json(res,503,{error:'server misconfigured: solana web3 unavailable'});
+        const hex=String(d.matchId||'').toLowerCase();
+        if(!/^[0-9a-f]{64}$/.test(hex))return json(res,400,{error:'missing or invalid matchId: call /match/new and deposit first'});
+        const pending=pendingMatches.get(hex);
+        if(!pending)return json(res,410,{error:'unknown or expired matchId: call /match/new again'});
+        let match;
+        try{match=await fetchMatchAccount(pending.matchId);}
+        catch(e){return json(res,502,{error:'could not verify deposit on-chain: '+e.message});}
+        if(!match)return json(res,409,{error:'deposit not confirmed on-chain yet'});
+        if(match.state!==MATCH_STATE.AT_RISK)return json(res,409,{error:'this match is not at-risk on-chain'});
+        if(match.player.toBase58()!==pending.player)return json(res,409,{error:'match belongs to a different wallet'});
+        if(!(match.atRisk>0n))return json(res,409,{error:'nothing at risk for this match'});
+        pendingMatches.delete(hex); /* one deposit, one arena session */
+        abyssBinding={hex,matchId:pending.matchId,player:pending.player,seq:match.seq,atRisk:match.atRisk};
+      }
       const room=pickRoom();
       /* Every human used to spawn '#45e8d4': in a busy room everyone was the
          same teal and you could not tell who was who. Pick from the palette
@@ -528,8 +716,15 @@ const server=http.createServer((req,res)=>{
       const s=makeSnake(name,colorFor(name),false);
       s.id='p'+(nextId++);s.events=[];s.lastSeen=Date.now();
       s.addQ=[];s.delQ=[];s.lastBoardsTs=0;
-      /* simulated entry economics: 20 burn, 10 team, 70 pool (real ones move on-chain) */
-      boards.pool+=95;dirty=true; /* V2 entry: 100 = 95 at risk + 5 protocol fee, NO entry burn */
+      if(abyssBinding){
+        s.abyss=abyssBinding;
+        /* real at-risk amount from the chain (base units), NOT the ENTRY
+           constant: THE ABYSS's value is whatever was actually deposited. */
+        s.val=Number(abyssBinding.atRisk);
+      }else{
+        /* simulated entry economics: 20 burn, 10 team, 70 pool (real ones move on-chain) */
+        boards.pool+=95;dirty=true; /* V2 entry: 100 = 95 at risk + 5 protocol fee, NO entry burn */
+      }
       placeAt(s,safeSpawn(room));
       room.players.set(s.id,s);
       return json(res,200,{proto:7,id:s.id,room:room.id,
@@ -593,6 +788,12 @@ const server=http.createServer((req,res)=>{
     if(req.method==='POST'&&req.url==='/leave'){
       for(const r of rooms){const p=r.players.get(d.id);
         if(p){if(p.alive)recordScore(p.name,p.peak);const sc=Math.round(p.peak),cv=p.alive?Math.round(p.val):0;
+          if(p.alive&&p.abyss&&cv>0){
+            /* THE ABYSS: escaped alive with real value on the head. This is
+               the ONLY fact /attest/claim will trust — whatever the client
+               says from here on carries no weight. */
+            escapedMatches.set(p.abyss.hex,{atRisk:BigInt(cv),seq:p.abyss.seq,player:p.abyss.player,createdAt:Date.now(),used:false});
+          }
           r.players.delete(d.id);return json(res,200,{score:sc,val:cv});}}
       return json(res,200,{score:0});
     }
