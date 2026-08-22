@@ -1,0 +1,14 @@
+{
+  "name": "lure-gameserver",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "keygen": "node keygen.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "tweetnacl": "^1.0.3"
+  }
+}
