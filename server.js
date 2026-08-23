@@ -156,9 +156,12 @@ const turnRateH=s=>Math.max(3.1,Math.min(5.6,5.6-s.length*0.0035)); /* humans: E
 
 /* ---- global rankings (shared by ALL rooms & devices) ---- */
 const BOARDS_FILE=process.env.BOARDS_FILE||'./boards.json';
-let boards={day:{},all:{},dayId:epochId(),pool:0,burn:0};
+let boards={day:{},all:{},dayId:epochId(),pool:0,burn:0,referrals:{}};
 function epochId(){const d=new Date();return d.getUTCFullYear()*10000+(d.getUTCMonth()+1)*100+d.getUTCDate();}
 try{const j=JSON.parse(fs.readFileSync(BOARDS_FILE,'utf8'));if(j&&j.all)boards=j;}catch(e){}
+/* boards.json guardado antes de existir los referidos no trae este campo:
+   sin esto, el primer registro reventaria contra undefined */
+if(!boards.referrals)boards.referrals={};
 for(const b of [boards.day,boards.all])for(const n of BOT_NAMES)delete b[n];
 function rollDay(){const id=epochId();if(id!==boards.dayId){boards.dayId=id;boards.day={};boards.pool=0;boards.burn=0;saveBoards();}}
 let dirty=false;
@@ -474,7 +477,7 @@ function pushEvent(room,s,ev){if(!s.bot){const p=room.players.get(s.id);if(p)p.e
 
 let pushT=0;
 function buildSnapshot(room,p,snap){
-  const msg={t:Math.round(room.simT*1000),you:{alive:p.alive,e:ENTRY,x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10,a:p.angle,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val)},
+  const msg={t:Math.round(room.simT*1000),you:{alive:p.alive,e:ENTRY,x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10,a:p.angle,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val),valPeak:Math.round(p.valPeak||0)},
     snakes:snap,events:p.events.splice(0)};
   if(p.addQ.length>400||p.delQ.length>300){
     p.addQ=[];p.delQ=[];
@@ -741,6 +744,18 @@ const server=http.createServer((req,res)=>{
          else is uppercased for the arena aesthetic. One canonical form
          per player = no case-twin duplicates on the boards. */
       const name=(raw.startsWith('@')?raw:raw.toUpperCase())||'ANON';
+      /* REFERIDOS. El sistema de recompensas se decide mas adelante, pero el
+         REGISTRO tiene que existir desde el dia uno: quien trajo a quien no
+         se puede reconstruir despues si no se guardo en su momento.
+         PRIMERA VEZ MANDA: si este jugador ya tiene referidor, no se toca.
+         Sin esa regla cualquiera se auto-refiere en bucle. */
+      const refRaw=String(d.ref||'').replace(/^@+/,'').replace(/[^A-Za-z0-9_]/g,'').slice(0,15);
+      if(refRaw){
+        const ref='@'+refRaw;
+        if(ref!==name&&!boards.referrals[name]){   /* y nadie se refiere a si mismo */
+          boards.referrals[name]=ref;dirty=true;
+        }
+      }
       /* THE ABYSS, step 2 of 3: real money only enters the arena after the
          deposit is CONFIRMED on-chain — never on the client's word alone. */
       let abyssBinding=null;
