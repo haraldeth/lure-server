@@ -197,7 +197,14 @@ function newRoom(){
 function pickRoom(){for(const r of rooms)if(r.players.size<ROOM_CAPACITY)return r;return newRoom();}
 function spawnFood(room,x,y,v,c,exceptId){
   let p;
-  if(x===undefined){ p=diskPoint(WORLD_R*.85); }
+  if(x===undefined){
+    /* ANTES: WORLD_R*.85 dejaba el 15% exterior del mapa (un anillo de 375
+       unidades) completamente vacio de comida. El borde no era una zona de
+       riesgo con recompensa, era espacio muerto donde no habia nada que
+       hacer. Ahora llega al 94%: hay comida hasta cerca del muro, pero sin
+       pegarla tanto como para que recogerla sea suicidio automatico. */
+    p=diskPoint(WORLD_R*.94);
+  }
   else {
     /* Comida colocada por COORDENADAS (cadaveres y rastro de boost). Hay que
        meterla dentro del mundo a la fuerza, porque quien la suelta puede estar
@@ -209,7 +216,7 @@ function spawnFood(room,x,y,v,c,exceptId){
             generar comida nueva y el centro del mapa se queda vacio
        Se empuja al 97% del radio (no al 100%) para que quede claramente dentro
        y se pueda comer sin rozar el muro. */
-    const d=Math.hypot(x,y), lim=WORLD_R*.97;
+    const d=Math.hypot(x,y), lim=WORLD_R*.96;
     if(d>lim && d>0){ const k=lim/d; p={x:x*k,y:y*k}; }
     else p={x,y};
   }
