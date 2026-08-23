@@ -409,7 +409,34 @@ function step(room,dt){
          /died, validated): killing them here with a stale copy produced
          unfair deaths. AFK humans fall through: the server-side absolute
          rule below applies to them exactly like bots: no pause exploit. */
-      if(Math.hypot(s.x,s.y)>WORLD_R+60)kill(room,s,null,'the wall');
+      if(Math.hypot(s.x,s.y)>WORLD_R+60){kill(room,s,null,'the wall');continue;}
+      /* ---- ARBITRO HUMANO-vs-HUMANO (el bug de atravesarse) ----------
+         La muerte contra OTRO HUMANO dependia al 100% de la pantalla de la
+         victima, que ve el cuerpo del atacante con el retardo completo de
+         ida y vuelta (~150-300ms). Si alguien se cruza rapido por delante,
+         en la pantalla de la victima ese cuerpo AUN NO ESTA ahi cuando su
+         cabeza pasa: se atraviesan sin morir nadie. Con bots no pasa porque
+         viven en el servidor y este los arbitra.
+         REGLA SLITHER ABSOLUTA: mismo radio y mismos puntos que la regla de
+         los bots, cuello incluido (bi=1). Aqui las dos posiciones tienen la
+         misma antiguedad (~un salto cada una), asi que la geometria es mas
+         justa que la de cualquiera de las dos pantallas. El cliente sigue
+         prediciendo su propia muerte al instante para que se sienta
+         inmediato; esto remata cualquier contacto que una pantalla con lag
+         no llegara a ver. Cero atravesamientos. */
+      const hrH=headR(s);
+      for(const o of all){
+        if(o===s||!o.alive||o.bot)continue;   /* solo contra HUMANOS */
+        const dx0=o.x-s.x,dy0=o.y-s.y;
+        if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
+        const bstepH=Math.max(10,o.length/80);
+        const rrH=hrH+headR(o)*.8+bstepH*.5;
+        for(let bi=1;bi<o.body.length;bi++){
+          const p=o.body[bi],dx=p.x-s.x,dy=p.y-s.y;
+          if(dx*dx+dy*dy<rrH*rrH){kill(room,s,o,o.name);break;}
+        }
+        if(!s.alive)break;
+      }
       continue;
     }
     if(Math.hypot(s.x,s.y)>WORLD_R){kill(room,s,null,'the wall');continue;}
