@@ -211,18 +211,19 @@ function spawnFood(room,x,y,v,c,exceptId){
     p=diskPoint(WORLD_R*.94);
   }
   else {
-    /* Comida colocada por COORDENADAS (cadaveres y rastro de boost). Hay que
-       meterla dentro del mundo a la fuerza, porque quien la suelta puede estar
-       justo en el muro o pasado de largo: una serpiente muere EN el limite y su
-       cadaver caeria fuera del area jugable.
-       Sin esto pasan dos cosas, y las dos se notan jugando:
-         1. se apilan orbes pegados al borde que nadie puede comer nunca
-         2. esos orbes cuentan para FOOD_TARGET, asi que el servidor deja de
-            generar comida nueva y el centro del mapa se queda vacio
-       Se empuja al 97% del radio (no al 100%) para que quede claramente dentro
-       y se pueda comer sin rozar el muro. */
+    /* Comida colocada por COORDENADAS (cadaveres y rastro de boost).
+       Si cae fuera del mundo (muertes EN el muro: el cuerpo cruza el limite),
+       se trae hacia dentro con DISPERSION RADIAL ALEATORIA, manteniendo el
+       angulo (localidad: la comida aparece cerca de donde murio).
+       NUNCA clavada a un radio fijo: el primer arreglo la fijaba toda al 96%
+       y las muertes en el muro fueron acumulando un ANILLO de orbes pegado
+       al borde mientras el centro se vaciaba (el anillo consumia el cupo de
+       FOOD_TARGET). Igual de malo que perderla fuera, solo que visible. */
     const d=Math.hypot(x,y), lim=WORLD_R*.96;
-    if(d>lim && d>0){ const k=lim/d; p={x:x*k,y:y*k}; }
+    if(d>lim && d>0){
+      const k=(lim*(0.72+Math.random()*0.25))/d;   /* radio aleatorio 69-93% */
+      p={x:x*k,y:y*k};
+    }
     else p={x,y};
   }
   const big=v===undefined&&Math.random()<.05;
