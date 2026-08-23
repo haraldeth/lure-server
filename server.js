@@ -162,6 +162,7 @@ try{const j=JSON.parse(fs.readFileSync(BOARDS_FILE,'utf8'));if(j&&j.all)boards=j
 /* boards.json guardado antes de existir los referidos no trae este campo:
    sin esto, el primer registro reventaria contra undefined */
 if(!boards.referrals)boards.referrals={};
+let refCache=null,refCacheT=0;   /* cache del ranking de referidos (10s) */
 for(const b of [boards.day,boards.all])for(const n of BOT_NAMES)delete b[n];
 function rollDay(){const id=epochId();if(id!==boards.dayId){boards.dayId=id;boards.day={};boards.pool=0;boards.burn=0;saveBoards();}}
 let dirty=false;
@@ -592,6 +593,24 @@ const server=http.createServer((req,res)=>{
     return json(res,200,{bodies:out});
   }
   if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
+  if(req.method==='GET'&&req.url.startsWith('/referrals')){
+    /* Ranking de quien trae mas gente. Solo cuenta, sin nombres de los
+       reclutados: quien refirio a quien es dato de otros, y no hace falta
+       exponerlo para hacer una tabla. La cache evita recorrer el mapa entero
+       en cada peticion cuando haya miles de entradas. */
+    const now=Date.now();
+    if(!refCache||now-refCacheT>10000){
+      const cuenta=new Map();
+      for(const quien of Object.values(boards.referrals||{}))
+        cuenta.set(quien,(cuenta.get(quien)||0)+1);
+      refCache=[...cuenta.entries()]
+        .map(([name,n])=>({name,n}))
+        .sort((a,b)=>b.n-a.n||a.name.localeCompare(b.name))
+        .slice(0,20);
+      refCacheT=now;
+    }
+    return json(res,200,{top:refCache,total:Object.keys(boards.referrals||{}).length});
+  }
   if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:7,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
   req.on('end',async()=>{
