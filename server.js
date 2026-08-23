@@ -130,9 +130,30 @@ setInterval(() => {
 
 /* ---- constants (mirror the client) ---- */
 const WORLD_R=2500, START_LENGTH=60, FOOD_TARGET=260, MAX_FOOD=300;
-const ROOM_CAPACITY=40, BOT_FILL=12, TICK=1/20;
+/* DENSIDAD — ajustada a la de slither.io.
+   Antes: 40 humanos + 12 bots FIJOS = hasta 52 serpientes en un mapa de radio
+   2500. Eso es una serpiente cada 377.000 u², casi OCHO veces mas denso que
+   slither.io (~2,9 millones por serpiente). Y peor: los bots se SUMABAN, asi
+   que la sala pasaba de 13 serpientes de madrugada a 52 en hora punta. El
+   juego se sentia distinto segun la hora.
+   Ahora hay un TOTAL fijo y los bots RELLENAN hasta ese total: 5 humanos ->
+   25 bots; 30 humanos -> 0 bots. La densidad es siempre la misma, vacio o
+   lleno, que es lo que hace que un mapa se sienta bien a cualquier hora.
+   Con 30 serpientes se ven ~6 a la vez en pantalla, justo el rango de
+   slither. */
+const SNAKES_PER_ROOM=30;          /* humanos + bots, total fijo */
+const ROOM_CAPACITY=SNAKES_PER_ROOM;
+const BOT_MIN=4;                   /* aun con la sala llena de humanos, algo de fauna */
+const TICK=1/20;
 const DROP_FRACTION=0.35;
-const BOT_NAMES=['ANGLER','KRAKEN','NAUTILUS','MANTA','VIPER','GLOWWORM','LEVIATHAN','DRIFTER','SIREN','ABYSSAL','LANTERN','EEL'];
+/* 30 nombres, uno por bot: con 12 se repetian dentro de la misma sala y se
+   veian dos SIREN a la vez, que canta muchisimo. Todos de fauna abisal real,
+   coherentes con la ambientacion. */
+const BOT_NAMES=['ANGLER','KRAKEN','NAUTILUS','MANTA','VIPER','GLOWWORM',
+  'LEVIATHAN','DRIFTER','SIREN','ABYSSAL','LANTERN','EEL',
+  'GULPER','HATCHET','DRAGONFISH','SNAILFISH','CUSK','GRENADIER',
+  'BARRELEYE','STARGAZER','OARFISH','CHIMAERA','RATTAIL','SLICKHEAD',
+  'BRISTLE','TRIPOD','PELICAN','SPOOKFISH','BLACKDEVIL','SEADEVIL'];
 const COLORS=['#45e8d4','#ff7ac8','#ffd166','#9d8cff','#7ce38b','#ff9d66'];
 /* bots wear muted deep-water tones: readable at a glance as FOOD, not prize */
 function colorFor(name){
@@ -196,7 +217,7 @@ const rooms=[];
 function newRoom(){
   const room={players:new Map(),bots:[],foods:new Map(),nextFood:1,id:rooms.length};
   for(let i=0;i<FOOD_TARGET;i++)spawnFood(room);
-  for(let i=0;i<BOT_FILL;i++){spawnBot(room,i);placeAt(room.bots[i],safeSpawn(room));}
+  for(let i=0;i<SNAKES_PER_ROOM;i++){spawnBot(room,i);placeAt(room.bots[i],safeSpawn(room));}
   rooms.push(room);return room;
 }
 function pickRoom(){for(const r of rooms)if(r.players.size<ROOM_CAPACITY)return r;return newRoom();}
@@ -264,17 +285,64 @@ function makeSnake(name,color,isBot){
     skill:isBot?(Math.random()<.3?rand(.8,1):Math.random()<.6?rand(.45,.75):rand(.2,.4)):1,
     wx:0,wy:0,wT:0};
 }
-function spawnBot(room,i){const b=makeSnake(BOT_NAMES[i%12],BOT_COLORS[i%6],true);b.id='b'+i;room.bots.push(b);}
+function spawnBot(room,i){const b=makeSnake(BOT_NAMES[i%BOT_NAMES.length],BOT_COLORS[i%6],true);b.id='b'+i;room.bots.push(b);}
 let nextId=1;
 
 /* ---- physics tick ---- */
 function step(room,dt){
   room.simT=(room.simT||0)+dt; /* sim-time odometer (tests/diagnostics) */
   const nowMs=Date.now();
+  /* DENSIDAD CONSTANTE: los bots rellenan hasta SNAKES_PER_ROOM, no se suman.
+     Se recalcula en cada tick porque la gente entra y sale constantemente, y
+     el objetivo es que el mapa se sienta IGUAL de vivo con 2 humanos que con
+     28. Se deja siempre un minimo de bots para que la arena nunca parezca un
+     desierto aunque este llena de humanos que se acaban de morir. */
+  {
+    const humanosVivos=[...room.players.values()].filter(s=>s.alive).length;
+    const botsQueTocan=Math.max(BOT_MIN,SNAKES_PER_ROOM-humanosVivos);
+    const botsActivos=room.bots.filter(b=>b.alive||b.respawnT>0).length;
+    if(botsActivos>botsQueTocan){
+      let sobran=botsActivos-botsQueTocan;
+      /* 1o los que ya estan muertos esperando: gratis, no los ve nadie */
+      for(const b of room.bots){
+        if(sobran<=0)break;
+        if(!b.alive&&b.respawnT>0){b.respawnT=-1;sobran--;}   /* -1 = dormido */
+      }
+      /* 2o si aun sobran, se retiran bots VIVOS que no este mirando nadie.
+         Sin esta parte la densidad se disparaba: medido, con 21 humanos
+         quedaban 18 bots vivos (39 serpientes) porque los vivos no se
+         marchan solos. Solo se retira a los que estan lejos de TODOS los
+         humanos: desaparecer delante de alguien se veria fatal. */
+      if(sobran>0){
+        const humanos=[...room.players.values()].filter(s=>s.alive);
+        for(const b of room.bots){
+          if(sobran<=0)break;
+          if(!b.alive)continue;
+          let visible=false;
+          for(const h of humanos){
+            const dx=b.x-h.x,dy=b.y-h.y;
+            if(dx*dx+dy*dy<1700*1700){visible=true;break;}
+          }
+          if(!visible){b.alive=false;b.respawnT=-1;sobran--;}
+        }
+      }
+    }else if(botsActivos<botsQueTocan){
+      let faltan=botsQueTocan-botsActivos;
+      for(const b of room.bots){
+        if(faltan<=0)break;
+        if(!b.alive&&b.respawnT<0){b.respawnT=rand(0.5,2.5);faltan--;} /* despertar */
+      }
+    }
+  }
   const all=[...room.players.values(),...room.bots].filter(s=>s.alive);
   /* bot AI (simplified port of the client AI) */
   for(const b of room.bots){
-    if(!b.alive){b.respawnT-=dt;if(b.respawnT<=0){Object.assign(b,makeSnake(b.name,b.color,true),{id:b.id});placeAt(b,safeSpawn(room));}continue;}
+    if(!b.alive){
+      if(b.respawnT<0)continue;   /* dormido: la sala tiene humanos de sobra */
+      b.respawnT-=dt;
+      if(b.respawnT<=0){Object.assign(b,makeSnake(b.name,b.color,true),{id:b.id});placeAt(b,safeSpawn(room));}
+      continue;
+    }
     b.wT-=dt;
     const wd=(b.wx-b.x)**2+(b.wy-b.y)**2;
     if(b.wT<=0||wd<120*120){b.wT=rand(3,6);const p=diskPoint(WORLD_R*(Math.random()<.2?.95:.8));b.wx=p.x;b.wy=p.y;}
@@ -425,7 +493,11 @@ function step(room,dt){
   for(const s of all){
     if(!s.alive)continue;
     if(!s.bot&&!s._afk){
-      if(Math.hypot(s.x,s.y)>WORLD_R+60){muertes.push([s,null,'the wall']);continue;}
+      /* Margen de tolerancia por latencia (el cliente ya te mata al tocar
+         el borde con la cabeza): aqui solo se remata a quien se pasa de
+         verdad, p.ej. una pestana congelada. Antes eran 60u de cortesia:
+         demasiado, se veia cruzar. */
+      if(Math.hypot(s.x,s.y)>WORLD_R+18){muertes.push([s,null,'the wall']);continue;}
       /* ARBITRO DEL SERVIDOR: todas las muertes del humano.
          Tu muerte contra un bot la decidia SOLO tu navegador: un frame
          perdido y el cruce no se detecta => atraviesas. Slither.io no lo
@@ -449,7 +521,9 @@ function step(room,dt){
       }
       continue;
     }
-    if(Math.hypot(s.x,s.y)>WORLD_R){muertes.push([s,null,'the wall']);continue;}
+    /* bots y AFK: mueren al TOCAR el muro con el borde de la cabeza, igual
+       que el jugador en su pantalla. Con el centro se les veia cruzar. */
+    if(Math.hypot(s.x,s.y)>WORLD_R-headR(s)){muertes.push([s,null,'the wall']);continue;}
     const hr=headR(s);
     for(const o of all){
       if(o===s||!o.alive)continue;
@@ -520,7 +594,7 @@ function pushEvent(room,s,ev){if(!s.bot){const p=room.players.get(s.id);if(p)p.e
 let pushT=0;
 function buildSnapshot(room,p,snap){
   const msg={t:Math.round(room.simT*1000),you:{alive:p.alive,e:ENTRY,x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10,a:p.angle,length:Math.round(p.length),kills:p.kills,score:Math.round(p.peak),val:Math.round(p.val),valPeak:Math.round(p.valPeak||0)},
-    snakes:snap,events:p.events.splice(0)};
+    snakes:snapshotCercano(snap,p),events:p.events.splice(0)};
   if(p.addQ.length>400||p.delQ.length>300){
     p.addQ=[];p.delQ=[];
     msg.foods=[...room.foods.values()];
@@ -570,6 +644,33 @@ function snakesSnapshot(room){
   for(const s of[...room.players.values(),...room.bots])if(s.alive)
     out.push({i:s.id,n:s.name,x:Math.round(s.x*10)/10,y:Math.round(s.y*10)/10,
       a:Math.round(s.angle*100)/100,l:Math.round(s.length),c:s.color,k:s.kills,v:Math.round(s.val||0)});
+  return out;
+}
+/* Recorte por CERCANIA — para que la sala llena no ahogue a nadie.
+   Antes se enviaban las 52 serpientes (40 jugadores + 12 bots) a todos, 12,5
+   veces por segundo: ~4 KB por paquete y por jugador, y el navegador
+   reconstruia 52 cuerpos en cada frame aunque 45 estuvieran a kilometros.
+   Eso son tirones garantizados en cuanto se llena una sala, justo lo que hay
+   que evitar el dia del lanzamiento.
+   Ahora cada jugador solo recibe lo que puede ver o casi: el radio cubre de
+   sobra la pantalla mas grande, y se conserva SIEMPRE el propio jugador. El
+   arbitro de colisiones del servidor sigue viendo a todos, asi que esto no
+   cambia ni una sola muerte: solo deja de mandar lo que nadie mira. */
+/* 1500 sale de la propia pantalla: el cliente ya descarta lo que esta a mas
+   de ~1100/zoom, asi que 1500 deja margen de sobra para que nada aparezca de
+   golpe en el borde, y recorta de verdad en salas llenas. */
+const VISION_R=1500;
+function snapshotCercano(snap,p){
+  if(snap.length<=14)return snap;   /* salas vacias: no merece la pena filtrar */
+  const out=[];
+  for(const sn of snap){
+    if(sn.i===p.id){out.push(sn);continue;}
+    const dx=sn.x-p.x,dy=sn.y-p.y;
+    /* el alcance crece con la longitud: una serpiente larga se ve venir
+       aunque su cabeza este lejos */
+    const r=VISION_R+sn.l;
+    if(dx*dx+dy*dy<=r*r)out.push(sn);
+  }
   return out;
 }
 let _bCache=null,_bTs=0;
