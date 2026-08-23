@@ -402,51 +402,54 @@ function step(room,dt){
   if(room.foods.size>=FOOD_TARGET)room.regen=0;
   if(room.foods.size>MAX_FOOD){const it=room.foods.keys();
     while(room.foods.size>MAX_FOOD){const k=it.next().value;room.foods.delete(k);for(const pl of room.players.values())pl.delQ.push(k);}}
-  /* collisions: head vs others' bodies + wall */
+  /* collisions: head vs others' bodies + wall
+     ------------------------------------------------------------------
+     DOS FASES, y la razon importa. Antes se mataba dentro del mismo bucle
+     que detectaba. Como los humanos van los PRIMEROS de `all` y el bucle
+     salta a los ya muertos (`!o.alive`), en un choque MUTUO moria el humano
+     y el bot que le habia embestido se salvaba: cuando le llegaba su turno,
+     su victima ya estaba muerta y el `continue` lo perdonaba.
+     Era literalmente "me embistio el y mori yo".
+     Ahora se recogen TODOS los contactos primero y se aplican despues: el
+     orden de la lista deja de decidir quien vive, y un choque mutuo mata a
+     los dos, como en slither. */
+  const muertes=[];
+  function tocaCuerpo(cabeza,o,rr){
+    const rr2=rr*rr;
+    for(let bi=1;bi<o.body.length;bi++){
+      const p=o.body[bi],dx=p.x-cabeza.x,dy=p.y-cabeza.y;
+      if(dx*dx+dy*dy<rr2)return true;
+    }
+    return false;
+  }
   for(const s of all){
     if(!s.alive)continue;
     if(!s.bot&&!s._afk){
-      /* ACTIVE humans die on their own screen (client-authoritative via
-         /died, validated): killing them here with a stale copy produced
-         unfair deaths. AFK humans fall through: the server-side absolute
-         rule below applies to them exactly like bots: no pause exploit. */
-      if(Math.hypot(s.x,s.y)>WORLD_R+60){kill(room,s,null,'the wall');continue;}
-      /* ---- ARBITRO DEL SERVIDOR: TODAS las muertes del humano ----------
-         Antes, tu muerte contra un bot o contra otro humano la decidia SOLO
-         tu navegador. Sin red de seguridad: un frame perdido (pausa del
-         sistema, pestana estrangulada, cualquier hipo) y el cruce no se
-         detecta => atraviesas. Es la clase de fallo que "a veces pasa" y no
-         se puede reproducir.
-         Slither.io no lo tiene porque alli el SERVIDOR arbitra todas las
-         muertes, siempre. Eso es esto: el cliente sigue prediciendo tu
-         muerte al instante (se siente inmediato), y el servidor remata
-         CUALQUIER contacto real que la pantalla no llegara a ver, contra
-         bots y contra humanos por igual. Cero atravesamientos posibles.
-         - contra HUMANOS: radio slither completo (ambas posiciones tienen
-           aqui la misma antiguedad, geometria justa para los dos)
-         - contra BOTS: radio ligeramente reducido — la pantalla los dibuja
-           ~180ms en el pasado, y este margen evita matar por un roce que en
-           tu pantalla esquivaste; un CRUCE de verdad (pasar la espina) cae
-           dentro siempre, con reportes a 12,5/s es matematicamente imposible
-           saltarsela */
+      if(Math.hypot(s.x,s.y)>WORLD_R+60){muertes.push([s,null,'the wall']);continue;}
+      /* ARBITRO DEL SERVIDOR: todas las muertes del humano.
+         Tu muerte contra un bot la decidia SOLO tu navegador: un frame
+         perdido y el cruce no se detecta => atraviesas. Slither.io no lo
+         tiene porque alli el servidor arbitra siempre. El cliente sigue
+         prediciendo tu muerte al instante (se siente inmediato) y esto
+         remata lo que tu pantalla no llegara a ver.
+           - contra HUMANOS: radio slither completo (ambas posiciones tienen
+             aqui la misma antiguedad: geometria justa para los dos)
+           - contra BOTS: radio algo menor, porque tu pantalla los dibuja
+             ~180ms en el pasado y no quiero matarte por un roce que TU
+             esquivaste; un cruce de verdad cae dentro siempre */
       const hrH=headR(s);
       for(const o of all){
         if(o===s||!o.alive)continue;
         const dx0=o.x-s.x,dy0=o.y-s.y;
         if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
         const bstepH=Math.max(10,o.length/80);
-        const rrH=o.bot
-          ? hrH+headR(o)*.5+bstepH*.5      /* bots: sin roces fantasma, cruce imposible de esquivar */
-          : hrH+headR(o)*.8+bstepH*.5;     /* humanos: slither completo */
-        for(let bi=1;bi<o.body.length;bi++){
-          const p=o.body[bi],dx=p.x-s.x,dy=p.y-s.y;
-          if(dx*dx+dy*dy<rrH*rrH){kill(room,s,o,o.name);break;}
-        }
-        if(!s.alive)break;
+        const rrH=o.bot?hrH+headR(o)*.5+bstepH*.5
+                       :hrH+headR(o)*.8+bstepH*.5;
+        if(tocaCuerpo(s,o,rrH)){muertes.push([s,o,o.name]);break;}
       }
       continue;
     }
-    if(Math.hypot(s.x,s.y)>WORLD_R){kill(room,s,null,'the wall');continue;}
+    if(Math.hypot(s.x,s.y)>WORLD_R){muertes.push([s,null,'the wall']);continue;}
     const hr=headR(s);
     for(const o of all){
       if(o===s||!o.alive)continue;
@@ -454,23 +457,19 @@ function step(room,dt){
       if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
       const bstep=Math.max(10,o.length/80);
       const rr=hr+headR(o)*.8+bstep*.5;
-      /* NECK ZONE, head-proximity gated: forgiving only when the two heads
-         are close (a real ram). Crossing a neck with the head far away is a
-         normal body hit: without the gate, the neck was a crossable blind
-         spot behind every head. */
-      /* THE ABSOLUTE RULE for bots too: head touches any body point =>
-         dies. No neck forgiveness: forgiveness zones are corridors.
-         El margen extra compensa que el cuerpo del humano que ve el servidor
-         va ~80ms por detras del que el jugador tiene en pantalla. Sin el, el
-         bot que embiste el costado de un humano a veces NO muere aqui, y el
-         cliente del humano —que ahora perdona esa muerte por haber sido
-         embestido— tampoco lo mata. Resultado: nadie muere y el bot atraviesa
-         al jugador. Con el margen, el que embiste muere de verdad. */
+      /* REGLA ABSOLUTA para bots: la cabeza toca cualquier punto del cuerpo
+         => muere. El margen extra compensa que el cuerpo del humano que ve
+         el servidor va ~80ms por detras del que el jugador tiene en
+         pantalla: sin el, el bot que embiste un costado a veces no moria. */
       const rrEmbestida=s.bot?rr+14:rr;
-      for(let bi=1;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
-        if(dx*dx+dy*dy<rrEmbestida*rrEmbestida){kill(room,s,o,o.name);break;}}
-      if(!s.alive)break;
+      if(tocaCuerpo(s,o,rrEmbestida)){muertes.push([s,o,o.name]);break;}
     }
+  }
+  /* Fase 2: aplicar. `asesino.alive` se comprueba AQUI, no antes: si los dos
+     se mataron, el credito no se le da a un cadaver, pero ambos mueren. */
+  for(const [victima,asesino,como] of muertes){
+    if(!victima.alive)continue;
+    kill(room,victima,(asesino&&asesino.alive)?asesino:null,como);
   }
 }
 function kill(room,s,killer,how){
