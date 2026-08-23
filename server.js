@@ -196,7 +196,23 @@ function newRoom(){
 }
 function pickRoom(){for(const r of rooms)if(r.players.size<ROOM_CAPACITY)return r;return newRoom();}
 function spawnFood(room,x,y,v,c,exceptId){
-  const p=(x===undefined)?diskPoint(WORLD_R*.85):{x,y};
+  let p;
+  if(x===undefined){ p=diskPoint(WORLD_R*.85); }
+  else {
+    /* Comida colocada por COORDENADAS (cadaveres y rastro de boost). Hay que
+       meterla dentro del mundo a la fuerza, porque quien la suelta puede estar
+       justo en el muro o pasado de largo: una serpiente muere EN el limite y su
+       cadaver caeria fuera del area jugable.
+       Sin esto pasan dos cosas, y las dos se notan jugando:
+         1. se apilan orbes pegados al borde que nadie puede comer nunca
+         2. esos orbes cuentan para FOOD_TARGET, asi que el servidor deja de
+            generar comida nueva y el centro del mapa se queda vacio
+       Se empuja al 97% del radio (no al 100%) para que quede claramente dentro
+       y se pueda comer sin rozar el muro. */
+    const d=Math.hypot(x,y), lim=WORLD_R*.97;
+    if(d>lim && d>0){ const k=lim/d; p={x:x*k,y:y*k}; }
+    else p={x,y};
+  }
   const big=v===undefined&&Math.random()<.05;
   const f={i:room.nextFood++,x:p.x,y:p.y,v:v!==undefined?v:(big?20:rand(3,7)),c:c||COLORS[(Math.random()*6)|0],big:!!big};
   room.foods.set(f.i,f);
@@ -230,7 +246,7 @@ function placeAt(s,p){s.x=p.x;s.y=p.y;s.path=[{x:p.x,y:p.y}];s.pathLen=0;s.body=
 function makeSnake(name,color,isBot){
   const p=diskPoint(WORLD_R*.6);
   return{name,color,bot:!!isBot,x:p.x,y:p.y,angle:rand(0,6.28),desired:rand(0,6.28),
-    length:START_LENGTH+(isBot?rand(0,120):0),peak:START_LENGTH,val:isBot?0:AT_RISK,boost:false,alive:true, /* bots NEVER carry $LURE: unfarmable */
+    length:START_LENGTH+(isBot?rand(0,120):0),peak:START_LENGTH,val:isBot?0:AT_RISK,valPeak:isBot?0:AT_RISK,boost:false,alive:true, /* bots NEVER carry $LURE: unfarmable */
     path:[{x:p.x,y:p.y}],pathLen:0,body:[{x:p.x,y:p.y}],kills:0,respawnT:0,
     skill:isBot?(Math.random()<.3?rand(.8,1):Math.random()<.6?rand(.45,.75):rand(.2,.4)):1,
     wx:0,wy:0,wT:0};
@@ -337,12 +353,34 @@ function step(room,dt){
       const cell=grid.get(cx+','+cy);if(!cell)continue;
       for(const f of cell){
         if(!room.foods.has(f.i))continue;
-        const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+20+(s.bot?0:26);
+        /* Radio de comer. El margen extra compensa el retardo de red: el
+           navegador del jugador va ~100-200ms por delante y ya se comio el
+           orbe en su pantalla; sin margen, el servidor se lo "devolveria".
+           Los BOTS viven aqui dentro, sin retardo ninguno: no les corresponde
+           ese regalo. Con el margen antiguo (+20 para todos) un bot aspiraba
+           orbes a 2-3 cabezas de distancia y se notaba jugando. */
+        const dx=f.x-s.x,dy=f.y-s.y,rr=hr*1.2+f.v*.3+(s.bot?6:46);
         if(dx*dx+dy*dy<rr*rr){
           const sizeM=1/(1+Math.max(0,s.length-START_LENGTH)/2600);
           s.length+=f.v*sizeM;
           room.foods.delete(f.i);for(const pl of room.players.values())pl.delQ.push(f.i);
         }
+      }
+    }
+  }
+  /* Barrido de orbes inalcanzables. El clamp de spawnFood impide que se creen
+     nuevos fuera del mundo, pero un servidor que lleve tiempo encendido puede
+     arrastrar los de antes del arreglo. Sin esto seguirian ocupando cupo de
+     FOOD_TARGET para siempre. Se comprueba una vez por segundo, no en cada
+     frame: recorrer todos los orbes 20 veces por segundo no aporta nada. */
+  room.sweepT=(room.sweepT||0)+dt;
+  if(room.sweepT>=1){
+    room.sweepT=0;
+    const lim=WORLD_R*.99;
+    for(const f of room.foods.values()){
+      if(Math.hypot(f.x,f.y)>lim){
+        room.foods.delete(f.i);
+        for(const pl of room.players.values())pl.delQ.push(f.i);
       }
     }
   }
@@ -385,6 +423,11 @@ function step(room,dt){
 function kill(room,s,killer,how){
   if(!s.alive)return;
   s.alive=false;
+  /* BUG ARREGLADO: el evento de muerte de abajo enviaba lost:s.val, pero para
+     entonces s.val ya estaba a cero (se pone a cero aqui arriba y dentro del
+     bloque del killer). El cliente NUNCA veia la cifra perdida, y el mensaje
+     "· lost X $LURE" del game over salia vacio siempre. Se captura ANTES. */
+  const lostVal=Math.round(s.val);
   if(!killer&&s.val>0){boards.burn+=s.val;s.val=0;dirty=true;} /* wall/timeout: full burn */
   const mass=Math.max(0,s.length-START_LENGTH);
   const nOrbs=Math.min(26,6+Math.floor(mass/90));
@@ -405,6 +448,8 @@ function kill(room,s,killer,how){
       if(!killer.bot){
         gain=Math.round(s.val*0.95);
         killer.val+=gain;boards.burn+=(s.val-gain);
+        /* pico de valor llevado: el killer acaba de crecer */
+        if(killer.val>(killer.valPeak||0))killer.valPeak=killer.val;
       }else{
         boards.burn+=s.val; /* bot kill: full burn */
       }
@@ -415,7 +460,7 @@ function kill(room,s,killer,how){
   /* only HUMANS enter the global rankings: bots fill the map, never the podium */
   if(!s.bot)recordScore(s.name,s.peak);
   if(s.bot){s.respawnT=rand(2.5,4.5);}
-  else{s.deadHow=how;pushEvent(room,s,{t:'death',how,score:Math.round(s.peak),lost:Math.round(s.val)});}
+  else{s.deadHow=how;pushEvent(room,s,{t:'death',how,score:Math.round(s.peak),lost:lostVal,valPeak:Math.round(s.valPeak||0)});}
   s.val=0;
 }
 function pushEvent(room,s,ev){if(!s.bot){const p=room.players.get(s.id);if(p)p.events.push(ev);}}
@@ -721,6 +766,7 @@ const server=http.createServer((req,res)=>{
         /* real at-risk amount from the chain (base units), NOT the ENTRY
            constant: THE ABYSS's value is whatever was actually deposited. */
         s.val=Number(abyssBinding.atRisk);
+        s.valPeak=s.val;
       }else{
         /* simulated entry economics: 20 burn, 10 team, 70 pool (real ones move on-chain) */
         boards.pool+=95;dirty=true; /* V2 entry: 100 = 95 at risk + 5 protocol fee, NO entry burn */
@@ -787,14 +833,14 @@ const server=http.createServer((req,res)=>{
     }
     if(req.method==='POST'&&req.url==='/leave'){
       for(const r of rooms){const p=r.players.get(d.id);
-        if(p){if(p.alive)recordScore(p.name,p.peak);const sc=Math.round(p.peak),cv=p.alive?Math.round(p.val):0;
+        if(p){if(p.alive)recordScore(p.name,p.peak);const sc=Math.round(p.peak),cv=p.alive?Math.round(p.val):0,vp=Math.round(p.valPeak||0);
           if(p.alive&&p.abyss&&cv>0){
             /* THE ABYSS: escaped alive with real value on the head. This is
                the ONLY fact /attest/claim will trust — whatever the client
                says from here on carries no weight. */
             escapedMatches.set(p.abyss.hex,{atRisk:BigInt(cv),seq:p.abyss.seq,player:p.abyss.player,createdAt:Date.now(),used:false});
           }
-          r.players.delete(d.id);return json(res,200,{score:sc,val:cv});}}
+          r.players.delete(d.id);return json(res,200,{score:sc,val:cv,valPeak:vp});}}
       return json(res,200,{score:0});
     }
     json(res,404,{error:'not found'});
