@@ -156,12 +156,13 @@ const turnRateH=s=>Math.max(3.1,Math.min(5.6,5.6-s.length*0.0035)); /* humans: E
 
 /* ---- global rankings (shared by ALL rooms & devices) ---- */
 const BOARDS_FILE=process.env.BOARDS_FILE||'./boards.json';
-let boards={day:{},all:{},dayId:epochId(),pool:0,burn:0,referrals:{}};
+let boards={day:{},all:{},dayId:epochId(),pool:0,burn:0,referrals:{},plays:{}};
 function epochId(){const d=new Date();return d.getUTCFullYear()*10000+(d.getUTCMonth()+1)*100+d.getUTCDate();}
 try{const j=JSON.parse(fs.readFileSync(BOARDS_FILE,'utf8'));if(j&&j.all)boards=j;}catch(e){}
 /* boards.json guardado antes de existir los referidos no trae este campo:
    sin esto, el primer registro reventaria contra undefined */
 if(!boards.referrals)boards.referrals={};
+if(!boards.plays)boards.plays={};   /* partidas por jugador, para el ranking de referidos */
 let refCache=null,refCacheT=0;   /* cache del ranking de referidos (10s) */
 for(const b of [boards.day,boards.all])for(const n of BOT_NAMES)delete b[n];
 function rollDay(){const id=epochId();if(id!==boards.dayId){boards.dayId=id;boards.day={};boards.pool=0;boards.burn=0;saveBoards();}}
@@ -424,9 +425,16 @@ function step(room,dt){
          normal body hit: without the gate, the neck was a crossable blind
          spot behind every head. */
       /* THE ABSOLUTE RULE for bots too: head touches any body point =>
-         dies. No neck forgiveness: forgiveness zones are corridors. */
+         dies. No neck forgiveness: forgiveness zones are corridors.
+         El margen extra compensa que el cuerpo del humano que ve el servidor
+         va ~80ms por detras del que el jugador tiene en pantalla. Sin el, el
+         bot que embiste el costado de un humano a veces NO muere aqui, y el
+         cliente del humano —que ahora perdona esa muerte por haber sido
+         embestido— tampoco lo mata. Resultado: nadie muere y el bot atraviesa
+         al jugador. Con el margen, el que embiste muere de verdad. */
+      const rrEmbestida=s.bot?rr+14:rr;
       for(let bi=1;bi<o.body.length;bi++){const p=o.body[bi];const dx=p.x-s.x,dy=p.y-s.y;
-        if(dx*dx+dy*dy<rr*rr){kill(room,s,o,o.name);break;}}
+        if(dx*dx+dy*dy<rrEmbestida*rrEmbestida){kill(room,s,o,o.name);break;}}
       if(!s.alive)break;
     }
   }
@@ -594,22 +602,46 @@ const server=http.createServer((req,res)=>{
   }
   if(req.method==='GET'&&req.url.startsWith('/rankings'))return json(res,200,cachedBoards());
   if(req.method==='GET'&&req.url.startsWith('/referrals')){
-    /* Ranking de quien trae mas gente. Solo cuenta, sin nombres de los
-       reclutados: quien refirio a quien es dato de otros, y no hace falta
-       exponerlo para hacer una tabla. La cache evita recorrer el mapa entero
-       en cada peticion cuando haya miles de entradas. */
+    /* RANKING DE RECLUTADORES.
+       Dos cifras, no una: cuanta gente trajiste, y cuantas partidas han
+       jugado entre todos. Traer a cien personas que entran una vez y no
+       vuelven no vale lo mismo que traer a diez que juegan a diario, y con
+       una sola cifra las dos cosas parecen iguales.
+       El orden lo marcan las PARTIDAS: es lo unico que no se puede inflar
+       repartiendo el enlace por ahi sin que a nadie le guste el juego.
+
+       Solo se publican recuentos, nunca a quien trajo cada uno: quien
+       refirio a quien es dato de otras personas y no hace falta exponerlo
+       para hacer una tabla. */
     const now=Date.now();
     if(!refCache||now-refCacheT>10000){
-      const cuenta=new Map();
-      for(const quien of Object.values(boards.referrals||{}))
-        cuenta.set(quien,(cuenta.get(quien)||0)+1);
-      refCache=[...cuenta.entries()]
-        .map(([name,n])=>({name,n}))
-        .sort((a,b)=>b.n-a.n||a.name.localeCompare(b.name))
-        .slice(0,20);
+      const gente=new Map(),partidas=new Map();
+      for(const [quien,padrino] of Object.entries(boards.referrals||{})){
+        gente.set(padrino,(gente.get(padrino)||0)+1);
+        partidas.set(padrino,(partidas.get(padrino)||0)+(boards.plays[quien]||0));
+      }
+      refCache=[...gente.entries()]
+        .map(([name,n])=>({name,n,plays:partidas.get(name)||0}))
+        .sort((a,b)=>b.plays-a.plays||b.n-a.n||a.name.localeCompare(b.name))
+        .slice(0,25);
       refCacheT=now;
     }
-    return json(res,200,{top:refCache,total:Object.keys(boards.referrals||{}).length});
+    /* Datos propios, si preguntan por un handle concreto */
+    let mine=null;
+    try{
+      const u=new URL(req.url,'http://x');
+      const who=String(u.searchParams.get('me')||'').replace(/^@+/,'').replace(/[^A-Za-z0-9_]/g,'').slice(0,15);
+      if(who){
+        const h='@'+who;
+        let n=0,plays=0;
+        for(const [quien,padrino] of Object.entries(boards.referrals||{})){
+          if(padrino===h){n++;plays+=(boards.plays[quien]||0);}
+        }
+        const pos=refCache.findIndex(e=>e.name===h);
+        mine={name:h,n,plays,rank:pos>=0?pos+1:0};
+      }
+    }catch(e){}
+    return json(res,200,{top:refCache,total:Object.keys(boards.referrals||{}).length,mine});
   }
   if(req.method==='GET'&&req.url.startsWith('/healthz'))return json(res,200,{ok:true,v:7,rooms:rooms.length});
   let body='';req.on('data',c=>{body+=c;if(body.length>4096)req.destroy();});
@@ -774,6 +806,15 @@ const server=http.createServer((req,res)=>{
         if(ref!==name&&!boards.referrals[name]){   /* y nadie se refiere a si mismo */
           boards.referrals[name]=ref;dirty=true;
         }
+      }
+      /* PARTIDAS DE LOS REFERIDOS.
+         Traer gente que entra una vez y no vuelve no vale lo mismo que traer
+         jugadores de verdad. Se cuentan las partidas de cada persona, y el
+         ranking usa las dos cifras. Es lo unico que distingue a quien reparte
+         su enlace en cualquier sitio de quien trae gente que juega. */
+      if(name!=='ANON'){
+        boards.plays[name]=(boards.plays[name]||0)+1;
+        dirty=true;
       }
       /* THE ABYSS, step 2 of 3: real money only enters the arena after the
          deposit is CONFIRMED on-chain — never on the client's word alone. */
