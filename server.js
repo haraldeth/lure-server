@@ -490,6 +490,29 @@ function step(room,dt){
     }
     return false;
   }
+  /* El cuerpo de `o` TAL COMO LO VEIA alguien con `retardoMs` de retraso.
+     No hace falta guardar historial: `o.path` YA es el rastro de por donde ha
+     pasado. Retroceder en el tiempo es empezar a leer ese rastro unas
+     unidades mas atras — las que recorrio durante ese retardo.
+     Es exacto para el cuerpo (que es literalmente el rastro) y muy buena
+     aproximacion para la cabeza. Coste: cero memoria extra. */
+  function cuerpoComoLoVeia(o,retardoMs){
+    const atras=185*(retardoMs/1000);          /* velocidad base del juego */
+    if(atras<4||!o.path||o.path.length<2)return null;
+    const stp=Math.max(10,o.length/80);
+    const pts=[];let acc=0,nx=atras;
+    for(let i=1;i<o.path.length&&acc<o.length+atras;i++){
+      const a=o.path[i-1],b=o.path[i],L=Math.hypot(b.x-a.x,b.y-a.y);
+      if(L<1e-4)continue;
+      while(nx<=acc+L&&nx<=o.length+atras){
+        const k=(nx-acc)/L;
+        pts.push({x:a.x+(b.x-a.x)*k,y:a.y+(b.y-a.y)*k});
+        nx+=stp;
+      }
+      acc+=L;
+    }
+    return pts.length>1?pts:null;
+  }
   for(const s of all){
     if(!s.alive)continue;
     if(!s.bot&&!s._afk){
@@ -510,14 +533,41 @@ function step(room,dt){
              ~180ms en el pasado y no quiero matarte por un roce que TU
              esquivaste; un cruce de verdad cae dentro siempre */
       const hrH=headR(s);
+      const retardo=s.viewDelay||0;
       for(const o of all){
         if(o===s||!o.alive)continue;
         const dx0=o.x-s.x,dy0=o.y-s.y;
         if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
         const bstepH=Math.max(10,o.length/80);
-        const rrH=o.bot?hrH+headR(o)*.5+bstepH*.5
-                       :hrH+headR(o)*.8+bstepH*.5;
-        if(tocaCuerpo(s,o,rrH)){muertes.push([s,o,o.name]);break;}
+        const rrH=hrH+headR(o)*.65+bstepH*.5;
+        /* Se comprueba contra el cuerpo QUE EL JUGADOR VEIA. Si por lo que
+           sea no se puede reconstruir (rastro corto, retardo minimo), se usa
+           el actual: mejor una comprobacion algo desfasada que ninguna. */
+        const visto=cuerpoComoLoVeia(o,retardo);
+        const cuerpoDeEl=visto||o.body;
+        /* ---- Misma regla de EMBESTIDA que el cliente ----
+           Sin esto el arreglo del cliente no servia de nada: el navegador
+           perdonaba el roce del cuello, y el servidor —que ahora ve la misma
+           geometria— encontraba ese mismo roce y te mataba igual.
+           Regla: si SOLO le rozas el cuello (sus 4 primeros puntos) y ademas
+           SU cabeza esta mas metida en tu cuerpo que la tuya en el suyo, te
+           embistio el: no mueres. El muere por su propia comprobacion. */
+        let contacto=false,cuerpoReal=false,miEnSu=Infinity;
+        const rr2=rrH*rrH;
+        for(let bi=1;bi<cuerpoDeEl.length;bi++){
+          const p=cuerpoDeEl[bi],dx=p.x-s.x,dy=p.y-s.y,d2=dx*dx+dy*dy;
+          if(d2<rr2){contacto=true;if(bi>4)cuerpoReal=true;if(d2<miEnSu)miEnSu=d2;}
+        }
+        if(!contacto)continue;
+        if(!cuerpoReal&&s.body&&s.body.length>1){
+          let suEnMi=Infinity;
+          for(let k=1;k<s.body.length;k++){
+            const m=s.body[k],mx=o.x-m.x,my=o.y-m.y,md2=mx*mx+my*my;
+            if(md2<suEnMi)suEnMi=md2;
+          }
+          if(suEnMi<miEnSu)continue;   /* me embistio el: sobrevivo */
+        }
+        muertes.push([s,o,o.name]);break;
       }
       continue;
     }
@@ -531,11 +581,11 @@ function step(room,dt){
       if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
       const bstep=Math.max(10,o.length/80);
       const rr=hr+headR(o)*.8+bstep*.5;
-      /* REGLA ABSOLUTA para bots: la cabeza toca cualquier punto del cuerpo
-         => muere. El margen extra compensa que el cuerpo del humano que ve
-         el servidor va ~80ms por detras del que el jugador tiene en
-         pantalla: sin el, el bot que embiste un costado a veces no moria. */
-      const rrEmbestida=s.bot?rr+14:rr;
+      /* Un bot embistiendo a un humano: el cuerpo del humano que ve el
+         servidor va ~80ms por detras del que el jugador tiene en pantalla.
+         El margen compensa ese desfase para que el que embiste muera de
+         verdad. Contra otro bot no hace falta: los dos son del servidor. */
+      const rrEmbestida=(s.bot&&!o.bot)?rr+14:rr;
       if(tocaCuerpo(s,o,rrEmbestida)){muertes.push([s,o,o.name]);break;}
     }
   }
@@ -1005,6 +1055,15 @@ const server=http.createServer((req,res)=>{
       for(const r of rooms){if(r.players.has(d.id)){room=r;p=r.players.get(d.id);break;}}
       if(!p)return json(res,404,{error:'unknown player'});
       const nowT=Date.now();
+      /* COMPENSACION DE LATENCIA: el cliente dice con cuanto retardo esta
+         dibujando a los demas. El servidor evalua sus colisiones con las
+         posiciones TAL COMO EL LAS VIO, no con las del presente. Sin esto,
+         el servidor ve al bot ~33u por delante de donde tu lo tienes en
+         pantalla: unas veces muere el sin tocarte y otras mueres tu sin
+         haberle tocado. Es la causa de los dos sintomas opuestos.
+         Se acota a 400ms para que nadie pueda pedir un rebobinado enorme y
+         matar a gente en el pasado. */
+      if(isFinite(d.d))p.viewDelay=Math.max(0,Math.min(400,d.d));
       if(p.alive){
         /* HYBRID MODEL (the one that plays right on 200ms links): the
            CLIENT owns its own movement (instant control) and its own death
