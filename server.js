@@ -410,8 +410,15 @@ function step(room,dt){
       while(s.pathLen>s.length+220&&s.path.length>2){
         const a=s.path.pop(),b2=s.path[s.path.length-1];
         s.pathLen-=Math.hypot(a.x-b2.x,a.y-b2.y);}}
-    /* body points, capped ~120 server-side (collisions only) */
-    const stp=Math.max(10,s.length/80);s.body=[];let acc=0,nx=0;
+    /* Puntos del cuerpo para colisiones.
+       MUESTREO FINO: antes eran length/80, o sea un punto cada 37 unidades en
+       una serpiente larga. Entre dos puntos hay hueco, asi que habia que
+       inflar el radio de colision con bstep*0.5 para taparlo... y eso hacia
+       que las cosas murieran ANTES de tocarse (medido: 86 ms antes).
+       Con length/150 los puntos van cada 20u, el hueco se reduce a la mitad y
+       la colision se ajusta a lo que se ve. Cuesta el doble de puntos, que
+       con 30 serpientes por sala es perfectamente asumible. */
+    const stp=Math.max(8,s.length/150);s.body=[];let acc=0,nx=0;
     for(let i=1;i<s.path.length&&acc<s.length;i++){
       const a=s.path[i-1],b2=s.path[i],L=Math.hypot(b2.x-a.x,b2.y-a.y);if(L<1e-4)continue;
       while(nx<=acc+L&&nx<=s.length){const k=(nx-acc)/L;
@@ -482,11 +489,24 @@ function step(room,dt){
      orden de la lista deja de decidir quien vive, y un choque mutuo mata a
      los dos, como en slither. */
   const muertes=[];
+  /* Distancia de la cabeza al SEGMENTO entre dos puntos del cuerpo, no a los
+     puntos sueltos. Es la diferencia entre una colision exacta y una inflada:
+     probando solo puntos hay huecos entre ellos, y para taparlos habia que
+     agrandar el radio — lo que hacia morir a la gente ANTES de tocarse
+     (medido: hasta 54 ms antes en serpientes largas).
+     Contra segmentos el cuerpo es una linea continua, como se dibuja, y el
+     radio puede ser exactamente el grosor real. */
   function tocaCuerpo(cabeza,o,rr){
-    const rr2=rr*rr;
-    for(let bi=1;bi<o.body.length;bi++){
-      const p=o.body[bi],dx=p.x-cabeza.x,dy=p.y-cabeza.y;
-      if(dx*dx+dy*dy<rr2)return true;
+    const rr2=rr*rr,B=o.body;
+    for(let bi=2;bi<B.length;bi++){
+      const a=B[bi-1],b=B[bi];
+      const vx=b.x-a.x,vy=b.y-a.y;
+      const wx=cabeza.x-a.x,wy=cabeza.y-a.y;
+      const L2=vx*vx+vy*vy;
+      let t=L2>0?(wx*vx+wy*vy)/L2:0;
+      if(t<0)t=0;else if(t>1)t=1;
+      const qx=wx-vx*t,qy=wy-vy*t;
+      if(qx*qx+qy*qy<rr2)return true;
     }
     return false;
   }
@@ -499,7 +519,7 @@ function step(room,dt){
   function cuerpoComoLoVeia(o,retardoMs){
     const atras=185*(retardoMs/1000);          /* velocidad base del juego */
     if(atras<4||!o.path||o.path.length<2)return null;
-    const stp=Math.max(10,o.length/80);
+    const stp=Math.max(8,o.length/150);   /* mismo muestreo que s.body */
     const pts=[];let acc=0,nx=atras;
     for(let i=1;i<o.path.length&&acc<o.length+atras;i++){
       const a=o.path[i-1],b=o.path[i],L=Math.hypot(b.x-a.x,b.y-a.y);
@@ -538,8 +558,8 @@ function step(room,dt){
         if(o===s||!o.alive)continue;
         const dx0=o.x-s.x,dy0=o.y-s.y;
         if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
-        const bstepH=Math.max(10,o.length/80);
-        const rrH=hrH+headR(o)*.65+bstepH*.5;
+        const bstepH=Math.max(8,o.length/150);
+        const rrH=hrH+headR(o)*.95;   /* exacto: grosor dibujado, sin inflar */
         /* Se comprueba contra el cuerpo QUE EL JUGADOR VEIA. Si por lo que
            sea no se puede reconstruir (rastro corto, retardo minimo), se usa
            el actual: mejor una comprobacion algo desfasada que ninguna. */
@@ -554,8 +574,12 @@ function step(room,dt){
            embistio el: no mueres. El muere por su propia comprobacion. */
         let contacto=false,cuerpoReal=false,miEnSu=Infinity;
         const rr2=rrH*rrH;
-        for(let bi=1;bi<cuerpoDeEl.length;bi++){
-          const p=cuerpoDeEl[bi],dx=p.x-s.x,dy=p.y-s.y,d2=dx*dx+dy*dy;
+        for(let bi=2;bi<cuerpoDeEl.length;bi++){
+          const a1=cuerpoDeEl[bi-1],b1=cuerpoDeEl[bi];
+          const vx=b1.x-a1.x,vy=b1.y-a1.y,wx=s.x-a1.x,wy=s.y-a1.y;
+          const L2=vx*vx+vy*vy;
+          let t=L2>0?(wx*vx+wy*vy)/L2:0; if(t<0)t=0;else if(t>1)t=1;
+          const qx=wx-vx*t,qy=wy-vy*t,d2=qx*qx+qy*qy;
           if(d2<rr2){contacto=true;if(bi>4)cuerpoReal=true;if(d2<miEnSu)miEnSu=d2;}
         }
         if(!contacto)continue;
@@ -579,14 +603,16 @@ function step(room,dt){
       if(o===s||!o.alive)continue;
       const dx0=o.x-s.x,dy0=o.y-s.y;
       if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
-      const bstep=Math.max(10,o.length/80);
-      const rr=hr+headR(o)*.8+bstep*.5;
-      /* Un bot embistiendo a un humano: el cuerpo del humano que ve el
-         servidor va ~80ms por detras del que el jugador tiene en pantalla.
-         El margen compensa ese desfase para que el que embiste muera de
-         verdad. Contra otro bot no hace falta: los dos son del servidor. */
-      const rrEmbestida=(s.bot&&!o.bot)?rr+14:rr;
-      if(tocaCuerpo(s,o,rrEmbestida)){muertes.push([s,o,o.name]);break;}
+      const bstep=Math.max(8,o.length/150);
+      const rr=hr+headR(o)*.95;   /* exacto: grosor dibujado, sin inflar */
+      /* SIN margen extra. Antes habia un +14 para compensar que el cuerpo del
+         humano llegaba con retraso, pero medido resultaba en 16 unidades de
+         exceso: el bot moria 86 ms ANTES de tocarte, y se veia.
+         Ya no hace falta ese parche: el cuerpo del humano es su rastro, y un
+         rastro apenas cambia de sitio aunque llegue 80 ms tarde (la
+         serpiente pasa por los mismos puntos). El parche compensaba un
+         problema que en realidad estaba en el muestreo, corregido abajo. */
+      if(tocaCuerpo(s,o,rr)){muertes.push([s,o,o.name]);break;}
     }
   }
   /* Fase 2: aplicar. `asesino.alive` se comprueba AQUI, no antes: si los dos
