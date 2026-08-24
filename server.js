@@ -229,7 +229,9 @@ function spawnFood(room,x,y,v,c,exceptId){
        riesgo con recompensa, era espacio muerto donde no habia nada que
        hacer. Ahora llega al 94%: hay comida hasta cerca del muro, pero sin
        pegarla tanto como para que recogerla sea suicidio automatico. */
-    p=diskPoint(WORLD_R*.94);
+    /* 0.90: justo dentro del alcance de los bots (dan la vuelta a
+       WORLD_R-140 = 0.944). Generar mas afuera creaba comida inmortal. */
+    p=diskPoint(WORLD_R*.90);
   }
   else {
     /* Comida colocada por COORDENADAS (cadaveres y rastro de boost).
@@ -242,7 +244,17 @@ function spawnFood(room,x,y,v,c,exceptId){
        FOOD_TARGET). Igual de malo que perderla fuera, solo que visible. */
     const d=Math.hypot(x,y), lim=WORLD_R*.96;
     if(d>lim && d>0){
-      const k=(lim*(0.72+Math.random()*0.25))/d;   /* radio aleatorio 69-93% */
+      /* Reparto UNIFORME POR AREA, no en una banda fija. El primer intento
+         los mandaba a un radio aleatorio entre el 69% y el 93%: mejor que un
+         anillo clavado, pero seguia sesgando hacia fuera, y como los bots
+         mueren mucho en el muro el borde acababa acumulando comida mientras
+         el centro se vaciaba (medido: 91 orbes en la banda exterior contra 25
+         en la segunda).
+         Con sqrt(aleatorio) la probabilidad es proporcional al AREA de cada
+         anillo, que es justo lo que hace que un disco se vea repartido de
+         verdad. Se conserva el angulo, asi que la comida sigue apareciendo en
+         la direccion en la que murio la serpiente. */
+      const k=(lim*Math.sqrt(Math.random()))/d;
       p={x:x*k,y:y*k};
     }
     else p={x,y};
@@ -355,7 +367,12 @@ function step(room,dt){
       if(sc<bestScore){bestScore=sc;nf=f;}
     }
     if(nf)target=Math.atan2(nf.y-b.y,nf.x-b.x);
-    if(Math.hypot(b.x,b.y)>WORLD_R-280)target=Math.atan2(-b.y,-b.x);
+    /* Los bots daban media vuelta a 280u del muro. Consecuencia no evidente:
+       la comida mas externa no se la comia NADIE y se acumulaba alli mientras
+       el centro se vaciaba (medido: 86 orbes en la banda exterior contra 36 en
+       la interior). Con 140u llegan a casi toda la comida y siguen sin
+       suicidarse contra el muro. */
+    if(Math.hypot(b.x,b.y)>WORLD_R-140)target=Math.atan2(-b.y,-b.x);
     const dodge=(58+b.skill*46)**2;
     for(const o of all){if(o===b)continue;
       const st=b.skill>.6?6:10;
@@ -472,7 +489,16 @@ function step(room,dt){
       }
     }
   }
-  room.regen=(room.regen||0)+6*dt; /* gradual regeneration: max 8 orbs/s */
+  /* 12 orbes/s. Con 6 no daba abasto: 30 serpientes comen mas rapido que eso
+     y el mapa se quedaba en ~190 de los 260 que deberia tener, lo que se nota
+     como "no hay comida". Sigue siendo gradual para que no aparezcan de golpe. */
+  /* La regeneracion tiene que ir con el numero de serpientes: con 30 comiendo,
+     12/s se quedaba en 202 de los 260 orbes y el mapa se veia pobre. Se
+     escala con las serpientes vivas y se acelera cuanto mas lejos esta del
+     objetivo, asi que se recupera rapido de una hambruna sin inundar el mapa
+     cuando ya esta lleno. */
+  const deficit=Math.max(0,FOOD_TARGET-room.foods.size)/FOOD_TARGET;
+  room.regen=(room.regen||0)+(10+all.length*1.6+deficit*40)*dt;
   while(room.foods.size<FOOD_TARGET&&room.regen>=1){room.regen-=1;spawnFood(room);}
   if(room.foods.size>=FOOD_TARGET)room.regen=0;
   if(room.foods.size>MAX_FOOD){const it=room.foods.keys();
@@ -558,7 +584,6 @@ function step(room,dt){
         if(o===s||!o.alive)continue;
         const dx0=o.x-s.x,dy0=o.y-s.y;
         if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
-        const bstepH=Math.max(8,o.length/150);
         const rrH=hrH+headR(o)*.95;   /* exacto: grosor dibujado, sin inflar */
         /* Se comprueba contra el cuerpo QUE EL JUGADOR VEIA. Si por lo que
            sea no se puede reconstruir (rastro corto, retardo minimo), se usa
@@ -603,7 +628,6 @@ function step(room,dt){
       if(o===s||!o.alive)continue;
       const dx0=o.x-s.x,dy0=o.y-s.y;
       if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
-      const bstep=Math.max(8,o.length/150);
       const rr=hr+headR(o)*.95;   /* exacto: grosor dibujado, sin inflar */
       /* SIN margen extra. Antes habia un +14 para compensar que el cuerpo del
          humano llegaba con retraso, pero medido resultaba en 16 unidades de
