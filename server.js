@@ -536,29 +536,6 @@ function step(room,dt){
     }
     return false;
   }
-  /* El cuerpo de `o` TAL COMO LO VEIA alguien con `retardoMs` de retraso.
-     No hace falta guardar historial: `o.path` YA es el rastro de por donde ha
-     pasado. Retroceder en el tiempo es empezar a leer ese rastro unas
-     unidades mas atras — las que recorrio durante ese retardo.
-     Es exacto para el cuerpo (que es literalmente el rastro) y muy buena
-     aproximacion para la cabeza. Coste: cero memoria extra. */
-  function cuerpoComoLoVeia(o,retardoMs){
-    const atras=185*(retardoMs/1000);          /* velocidad base del juego */
-    if(atras<4||!o.path||o.path.length<2)return null;
-    const stp=Math.max(8,o.length/150);   /* mismo muestreo que s.body */
-    const pts=[];let acc=0,nx=atras;
-    for(let i=1;i<o.path.length&&acc<o.length+atras;i++){
-      const a=o.path[i-1],b=o.path[i],L=Math.hypot(b.x-a.x,b.y-a.y);
-      if(L<1e-4)continue;
-      while(nx<=acc+L&&nx<=o.length+atras){
-        const k=(nx-acc)/L;
-        pts.push({x:a.x+(b.x-a.x)*k,y:a.y+(b.y-a.y)*k});
-        nx+=stp;
-      }
-      acc+=L;
-    }
-    return pts.length>1?pts:null;
-  }
   for(const s of all){
     if(!s.alive)continue;
     if(!s.bot&&!s._afk){
@@ -579,17 +556,27 @@ function step(room,dt){
              ~180ms en el pasado y no quiero matarte por un roce que TU
              esquivaste; un cruce de verdad cae dentro siempre */
       const hrH=headR(s);
-      const retardo=s.viewDelay||0;
       for(const o of all){
         if(o===s||!o.alive)continue;
         const dx0=o.x-s.x,dy0=o.y-s.y;
         if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
         const rrH=hrH+headR(o)*.95;   /* exacto: grosor dibujado, sin inflar */
-        /* Se comprueba contra el cuerpo QUE EL JUGADOR VEIA. Si por lo que
-           sea no se puede reconstruir (rastro corto, retardo minimo), se usa
-           el actual: mejor una comprobacion algo desfasada que ninguna. */
-        const visto=cuerpoComoLoVeia(o,retardo);
-        const cuerpoDeEl=visto||o.body;
+        /* EN PRESENTE, UN SOLO MARCO DE TIEMPO — como slither.io.
+           Hubo una version que rebobinaba el cuerpo del rival al instante
+           que la victima VEIA en su pantalla (~180ms atras). Sonaba justo y
+           rompia el PvP rapido: si B se cruza por delante de A AHORA, el
+           cruce fresco no existe en el pasado rebobinado, asi que el arbitro
+           no lo veia... y la pantalla de A tampoco (va con retraso). Nadie
+           registraba el contacto: se atravesaban. Era exactamente la queja
+           de "sprinto, me pongo delante y nos atravesamos, o muere el que
+           no es".
+           Juzgando TODO en el presente del servidor, con la geometria mas
+           fresca de todos a la vez, el cruce se detecta 1-2 ticks despues
+           del contacto real (~50-150ms), muere quien toca, y no hay dos
+           relojes que mezclar. El precio: tu muerte puede llegar una decima
+           antes de que tu pantalla dibuje el contacto. Es el mismo trato
+           que hace slither.io, y es el unico que no deja pasillos. */
+        const cuerpoDeEl=o.body;
         /* ---- Misma regla de EMBESTIDA que el cliente ----
            Sin esto el arreglo del cliente no servia de nada: el navegador
            perdonaba el roce del cuello, y el servidor —que ahora ve la misma
@@ -1105,15 +1092,7 @@ const server=http.createServer((req,res)=>{
       for(const r of rooms){if(r.players.has(d.id)){room=r;p=r.players.get(d.id);break;}}
       if(!p)return json(res,404,{error:'unknown player'});
       const nowT=Date.now();
-      /* COMPENSACION DE LATENCIA: el cliente dice con cuanto retardo esta
-         dibujando a los demas. El servidor evalua sus colisiones con las
-         posiciones TAL COMO EL LAS VIO, no con las del presente. Sin esto,
-         el servidor ve al bot ~33u por delante de donde tu lo tienes en
-         pantalla: unas veces muere el sin tocarte y otras mueres tu sin
-         haberle tocado. Es la causa de los dos sintomas opuestos.
-         Se acota a 400ms para que nadie pueda pedir un rebobinado enorme y
-         matar a gente en el pasado. */
-      if(isFinite(d.d))p.viewDelay=Math.max(0,Math.min(400,d.d));
+
       if(p.alive){
         /* HYBRID MODEL (the one that plays right on 200ms links): the
            CLIENT owns its own movement (instant control) and its own death
