@@ -608,23 +608,63 @@ function step(room,dt){
            embistio el: no mueres. El muere por su propia comprobacion. */
         let contacto=false,cuerpoReal=false,miEnSu=Infinity;
         const rr2=rrH*rrH;
+        /* SEGMENTO CONTRA SEGMENTO, no punto contra segmento.
+           Se comprueba el RECORRIDO de tu cabeza desde el reporte anterior
+           hasta el actual, contra cada tramo de su cuerpo. Comprobando solo
+           el punto final, una cabeza que salta 23u (boost, 80ms entre
+           reportes) puede aparecer al otro lado de un cuerpo sin que ningun
+           tick la vea dentro: se atraviesa sin tocar.
+           Tu navegador ya hace esto con tu propia cabeza; faltaba aqui, que
+           es justo la red que cubre al cliente congelado o tramposo. */
+        const ax0=(s._px!==undefined?s._px:s.x), ay0=(s._py!==undefined?s._py:s.y);
+        const mvx=s.x-ax0, mvy=s.y-ay0, mL2=mvx*mvx+mvy*mvy;
         for(let bi=1;bi<cuerpoDeEl.length;bi++){   /* incluye el cuello */
           const a1=cuerpoDeEl[bi-1],b1=cuerpoDeEl[bi];
-          const vx=b1.x-a1.x,vy=b1.y-a1.y,wx=s.x-a1.x,wy=s.y-a1.y;
-          const L2=vx*vx+vy*vy;
-          let t=L2>0?(wx*vx+wy*vy)/L2:0; if(t<0)t=0;else if(t>1)t=1;
-          const qx=wx-vx*t,qy=wy-vy*t,d2=qx*qx+qy*qy;
+          const vx=b1.x-a1.x,vy=b1.y-a1.y;
+          let d2;
+          if(mL2<1){                       /* apenas te has movido: punto */
+            const wx=s.x-a1.x,wy=s.y-a1.y,L2=vx*vx+vy*vy;
+            let t=L2>0?(wx*vx+wy*vy)/L2:0; if(t<0)t=0;else if(t>1)t=1;
+            const qx=wx-vx*t,qy=wy-vy*t; d2=qx*qx+qy*qy;
+          }else{
+            /* distancia minima entre el recorrido de mi cabeza y su tramo:
+               se muestrea el recorrido, que es corto (<30u) y basta con
+               pocos puntos para no dejar hueco */
+            d2=Infinity;
+            const pasos=Math.max(2,Math.min(6,Math.ceil(Math.sqrt(mL2)/8)));
+            for(let k=0;k<=pasos;k++){
+              const hx=ax0+mvx*(k/pasos), hy=ay0+mvy*(k/pasos);
+              const wx=hx-a1.x,wy=hy-a1.y,L2=vx*vx+vy*vy;
+              let t=L2>0?(wx*vx+wy*vy)/L2:0; if(t<0)t=0;else if(t>1)t=1;
+              const qx=wx-vx*t,qy=wy-vy*t,dd=qx*qx+qy*qy;
+              if(dd<d2)d2=dd;
+            }
+          }
           if(d2<rr2){contacto=true;if(bi>4)cuerpoReal=true;if(d2<miEnSu)miEnSu=d2;}
         }
         if(!contacto)continue;
         huboContacto=true;
+        /* QUIEN CHOCA MUERE, decidido por DONDE se toca, no por a que
+           distancia. Comparar distancias era fragil: con las dos cabezas
+           cerca, unas veces ganaba una y otras la otra, sin patron (medido:
+           fallaba 1 de cada 3 veces).
+           El sitio del contacto no tiene esa ambiguedad:
+             - tocar el CUERPO de alguien (lejos de su cabeza) = chocaste tu
+             - tocar solo su CUELLO = estabais cabeza con cabeza
+           Regla, simetrica y estable:
+             el toca mi cuerpo real Y yo solo su cuello  -> me embistio: vivo
+             cualquier otro caso                          -> muero
+           Un frontal (los dos en el cuello) mata a los dos, como slither.
+           Y cortarle el paso a alguien sigue siendo jugada valida: quien se
+           come el cuerpo cruzado, muere. */
         if(!cuerpoReal&&s.body&&s.body.length>1){
-          let suEnMi=Infinity;
+          let suIdxMax=-1;
+          const rr2b=rrH*rrH;
           for(let k=1;k<s.body.length;k++){
-            const m=s.body[k],mx=o.x-m.x,my=o.y-m.y,md2=mx*mx+my*my;
-            if(md2<suEnMi)suEnMi=md2;
+            const m=s.body[k],mx=o.x-m.x,my=o.y-m.y;
+            if(mx*mx+my*my<rr2b&&k>suIdxMax)suIdxMax=k;
           }
-          if(suEnMi<miEnSu)continue;   /* me embistio el: sobrevivo */
+          if(suIdxMax>4)continue;   /* su cabeza en mi cuerpo real: me embistio */
         }
         /* CONFIRMACION EN DOS TICKS — el arreglo de "me aparte y mori yo".
            Tu posicion llega al servidor con hasta 80ms de retraso (23u con
@@ -767,7 +807,12 @@ function snakesSnapshot(room){
   const out=[];
   for(const s of[...room.players.values(),...room.bots])if(s.alive)
     out.push({i:s.id,n:s.name,x:Math.round(s.x*10)/10,y:Math.round(s.y*10)/10,
-      a:Math.round(s.angle*100)/100,l:Math.round(s.length),c:s.color,k:s.kills,v:Math.round(s.val||0)});
+      a:Math.round(s.angle*100)/100,l:Math.round(s.length),c:s.color,k:s.kills,v:Math.round(s.val||0),
+      /* `b:1` solo en los bots. El cliente no tenia forma de distinguirlos:
+         los pintaba a todos igual en el minimapa, asi que no sabias si el
+         punto que se te acerca es una persona o relleno. Se manda solo
+         cuando es bot (1 byte) en vez de en las 30 serpientes. */
+      ...(s.bot?{b:1}:{})});
   return out;
 }
 /* Recorte por CERCANIA — para que la sala llena no ahogue a nadie.
@@ -1137,6 +1182,9 @@ const server=http.createServer((req,res)=>{
            speed clamp, and stays authoritative for bots, eating, length
            and the economy. Full server integration needs regional servers. */
         if(isFinite(d.x)&&isFinite(d.y)){
+          /* posicion ANTERIOR, para que el arbitro compruebe el recorrido de
+             la cabeza y no solo el punto final (ver el bloque del barrido) */
+          p._px=p.x; p._py=p.y;
           /* client-contributed path length feeds the AFK detector. Only
              counts vs the client's OWN last reported point (not the
              server-driven position), so catch-up driving never looks like
