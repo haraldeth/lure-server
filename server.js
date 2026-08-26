@@ -524,7 +524,16 @@ function step(room,dt){
      radio puede ser exactamente el grosor real. */
   function tocaCuerpo(cabeza,o,rr){
     const rr2=rr*rr,B=o.body;
-    for(let bi=2;bi<B.length;bi++){
+    /* Empieza en bi=1, o sea en el segmento CABEZA -> primer punto: el
+       CUELLO. Con bi=2 ese tramo no se probaba nunca, y era un punto ciego
+       real de 8-20u justo detras de cada cabeza. Sintoma exacto que
+       reportaban los jugadores: "me clava la cabeza en el cuello y muero yo".
+       Su cabeza caia en la franja invisible, el servidor no le mataba, y
+       mientras tanto la pantalla de la victima si veia su propia cabeza
+       tocando cuerpo y se mataba sola.
+       Incluir el cuello tambien hace que un frontal puro mate a los dos,
+       que es lo que hace slither.io. */
+    for(let bi=1;bi<B.length;bi++){
       const a=B[bi-1],b=B[bi];
       const vx=b.x-a.x,vy=b.y-a.y;
       const wx=cabeza.x-a.x,wy=cabeza.y-a.y;
@@ -556,11 +565,24 @@ function step(room,dt){
              ~180ms en el pasado y no quiero matarte por un roce que TU
              esquivaste; un cruce de verdad cae dentro siempre */
       const hrH=headR(s);
+      let huboContacto=false;
       for(const o of all){
         if(o===s||!o.alive)continue;
         const dx0=o.x-s.x,dy0=o.y-s.y;
         if(dx0*dx0+dy0*dy0>(o.length+300)**2)continue;
-        const rrH=hrH+headR(o)*.95;   /* exacto: grosor dibujado, sin inflar */
+        /* RADIO REDUCIDO A PROPOSITO — aqui manda TU PANTALLA.
+           Quien decide tu muerte es tu navegador, que colisiona contra lo
+           que dibuja: lo que ves es lo que te mata. Este arbitro es la red
+           de seguridad para lo que tu pantalla NO puede ver (un cliente
+           congelado, una pestaña en segundo plano, un tramposo), no una
+           segunda opinion sobre roces.
+           Con el radio exacto, el servidor discutia contigo cada contacto
+           al limite usando una posicion tuya de hace 80ms, y ganaba el
+           servidor: morias por roces que en tu pantalla habias esquivado.
+           Con el 55% del radio hace falta estar metido de verdad en el
+           cuerpo, no rozarlo. Un atravesamiento real cae dentro de sobra;
+           un roce lo decide tu pantalla, que es la que tiene razon. */
+        const rrH=(hrH+headR(o)*.95)*0.55;
         /* EN PRESENTE, UN SOLO MARCO DE TIEMPO — como slither.io.
            Hubo una version que rebobinaba el cuerpo del rival al instante
            que la victima VEIA en su pantalla (~180ms atras). Sonaba justo y
@@ -586,7 +608,7 @@ function step(room,dt){
            embistio el: no mueres. El muere por su propia comprobacion. */
         let contacto=false,cuerpoReal=false,miEnSu=Infinity;
         const rr2=rrH*rrH;
-        for(let bi=2;bi<cuerpoDeEl.length;bi++){
+        for(let bi=1;bi<cuerpoDeEl.length;bi++){   /* incluye el cuello */
           const a1=cuerpoDeEl[bi-1],b1=cuerpoDeEl[bi];
           const vx=b1.x-a1.x,vy=b1.y-a1.y,wx=s.x-a1.x,wy=s.y-a1.y;
           const L2=vx*vx+vy*vy;
@@ -595,6 +617,7 @@ function step(room,dt){
           if(d2<rr2){contacto=true;if(bi>4)cuerpoReal=true;if(d2<miEnSu)miEnSu=d2;}
         }
         if(!contacto)continue;
+        huboContacto=true;
         if(!cuerpoReal&&s.body&&s.body.length>1){
           let suEnMi=Infinity;
           for(let k=1;k<s.body.length;k++){
@@ -603,8 +626,22 @@ function step(room,dt){
           }
           if(suEnMi<miEnSu)continue;   /* me embistio el: sobrevivo */
         }
+        /* CONFIRMACION EN DOS TICKS — el arreglo de "me aparte y mori yo".
+           Tu posicion llega al servidor con hasta 80ms de retraso (23u con
+           boost, mas de media cabeza). Si giras rapido para esquivar, tu
+           pantalla ya te ha sacado de ahi pero el servidor aun te tiene
+           DONDE ESTABAS: te mata por un contacto que ya no existe.
+           Un contacto fantasma de esos desaparece en cuanto llega tu
+           posicion nueva; uno de verdad sigue ahi. Asi que se exige que
+           persista DOS ticks seguidos (~100ms) antes de matarte.
+           No reabre atravesamientos: quien esta de verdad metido en un
+           cuerpo lo sigue estando al tick siguiente. Y el que TE embistio
+           muere en su propia comprobacion, sin esperar a nada. */
+        s._tocando=(s._tocando||0)+1;
+        if(s._tocando<2){s._tocandoCon=o.id;break;}
         muertes.push([s,o,o.name]);break;
       }
+      if(!huboContacto)s._tocando=0;   /* se solto: el contador vuelve a cero */
       continue;
     }
     /* bots y AFK: mueren al TOCAR el muro con el borde de la cabeza, igual
